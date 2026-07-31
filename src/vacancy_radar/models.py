@@ -1,6 +1,23 @@
 """Pydantic schemas shared across the API and LLM providers."""
 
-from pydantic import BaseModel
+from datetime import date
+
+from pydantic import BaseModel, ConfigDict
+
+
+class VacancyRecord(BaseModel):
+    """Minimum required shape of a vacancy folder's `vacancy.yaml`.
+
+    Only the four fields needed for retrieval metadata (see retriever.py) are validated;
+    any other fields from the maintainer's private schema pass through unvalidated.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    company: str
+    position: str
+    date: date
+    outcome: str
 
 
 class Citation(BaseModel):

@@ -15,4 +15,8 @@ class SentenceTransformersEmbedder(Embedder):
         self._model = None  # lazy-loaded in M2
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        raise NotImplementedError("M2: load sentence-transformers model and embed")
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+
+            self._model = SentenceTransformer(self.model_name)
+        return self._model.encode(texts).tolist()
