@@ -1,0 +1,23 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data/user:/data/user:ro
+      - ./data/example:/data/example:ro
+      - ./.cache:/app/.cache
+
+  # LLM_PROVIDER=ollama in .env to use this instead of the Claude API
+  ollama:
+    image: ollama/ollama
+    profiles: ["local"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+volumes:
+  ollama-data:
