@@ -15,7 +15,7 @@ class CompatStamp:
     schema_version: str
 
 
-CURRENT_STAMP = CompatStamp(embedding_model="BAAI/bge-small-en-v1.5", schema_version="1")
+CURRENT_STAMP = CompatStamp(embedding_model="BAAI/bge-small-en-v1.5", schema_version="2")
 
 
 def needs_reindex(stored_stamp: CompatStamp | None) -> bool:

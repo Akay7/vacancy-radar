@@ -27,6 +27,9 @@ from vacancy_radar.models import VacancyRecord
 CHROMA_PATH = ".cache/chroma"
 BULLETS_COLLECTION = "experience_bullets"
 VACANCIES_COLLECTION = "vacancies"
+# Cosine distance gives a bounded, thresholdable similarity score for /similar retrieval
+# (see specs/002-similar-retrieval/research.md) — must be set at collection-creation time.
+VACANCIES_COLLECTION_METADATA = {"hnsw:space": "cosine"}
 
 NATURAL_KEY_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_[a-z0-9-]+_[a-z0-9-]+$")
 BULLET_LINE_RE = re.compile(r"^\s*[-*+]\s+(.*\S)\s*$")
@@ -248,6 +251,7 @@ def ingest_vacancies(
                 documents=[c["document"] for c in to_embed],
                 embeddings=vectors,
                 metadatas=[c["metadata"] for c in to_embed],
+                collection_metadata=VACANCIES_COLLECTION_METADATA,
             )
 
         if is_new_key:
@@ -289,6 +293,6 @@ def reindex(cv_dir: Path, vacancy_dir: Path) -> RunSummary:
     """
     store = ChromaStore(CHROMA_PATH)
     store.reset_collection(BULLETS_COLLECTION)
-    store.reset_collection(VACANCIES_COLLECTION)
+    store.reset_collection(VACANCIES_COLLECTION, metadata=VACANCIES_COLLECTION_METADATA)
     manifest_module.delete()
     return run_ingest(cv_dir, vacancy_dir, incremental=False)

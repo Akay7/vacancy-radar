@@ -18,8 +18,8 @@ class ChromaStore:
         # cwds, as in tests) never collide on the same cached connection.
         self._client = chromadb.PersistentClient(path=str(Path(path).resolve()))
 
-    def get_or_create_collection(self, name: str):
-        return self._client.get_or_create_collection(name=name)
+    def get_or_create_collection(self, name: str, metadata: dict | None = None):
+        return self._client.get_or_create_collection(name=name, metadata=metadata)
 
     def upsert(
         self,
@@ -28,10 +28,11 @@ class ChromaStore:
         documents: list[str],
         embeddings: list[list[float]],
         metadatas: list[dict] | None = None,
+        collection_metadata: dict | None = None,
     ) -> None:
         if not ids:
             return
-        self.get_or_create_collection(collection).upsert(
+        self.get_or_create_collection(collection, metadata=collection_metadata).upsert(
             ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas
         )
 
@@ -46,7 +47,7 @@ class ChromaStore:
         if ids:
             self.get_or_create_collection(collection).delete(ids=ids)
 
-    def reset_collection(self, collection: str) -> None:
+    def reset_collection(self, collection: str, metadata: dict | None = None) -> None:
         """Drop and recreate a collection via the Chroma client API.
 
         Deliberately does NOT delete `.cache/chroma` on disk: doing so out from under a
@@ -58,7 +59,22 @@ class ChromaStore:
             self._client.delete_collection(name=collection)
         except chromadb.errors.NotFoundError:
             pass
-        self.get_or_create_collection(collection)
+        self.get_or_create_collection(collection, metadata=metadata)
 
     def count(self, collection: str) -> int:
         return self.get_or_create_collection(collection).count()
+
+    def query(
+        self,
+        collection: str,
+        query_embeddings: list[list[float]],
+        n_results: int,
+        where: dict | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        return self.get_or_create_collection(collection, metadata=metadata).query(
+            query_embeddings=query_embeddings,
+            n_results=n_results,
+            where=where,
+            include=["documents", "metadatas", "distances"],
+        )

@@ -34,9 +34,11 @@ class Flag(BaseModel):
 class SimilarVacancy(BaseModel):
     vacancy_id: str
     company: str
-    title: str
+    position: str
     outcome: str
     similarity: float
+    excerpt: str
+    is_duplicate: bool
 
 
 class Report(BaseModel):
