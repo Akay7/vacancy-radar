@@ -1,8 +1,11 @@
 """Pydantic schemas shared across the API and LLM providers."""
 
 from datetime import date
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
+
+MatchBand = Literal["strong", "good", "weak", "poor"]
 
 
 class VacancyRecord(BaseModel):
@@ -42,9 +45,36 @@ class SimilarVacancy(BaseModel):
 
 
 class Report(BaseModel):
-    score: float
+    score: MatchBand
     flags: list[Flag]
     gaps: list[str]
     similar: list[SimilarVacancy]
     draft_paragraph: str
     citations: list[Citation]
+
+
+class CandidateFlag(BaseModel):
+    """A flag as the LLM proposed it — not yet checked against real source text."""
+
+    label: str
+    severity: str  # "red" | "green"
+    reason: str
+    quote: str
+    source_id: str
+
+
+class CandidateSentence(BaseModel):
+    """One draft-paragraph sentence as the LLM proposed it, with its claimed source."""
+
+    text: str
+    quote: str
+    source_id: str
+
+
+class CandidateReport(BaseModel):
+    """Raw LLM output for /analyze, before `grounding.enforce()` validates every citation."""
+
+    match_band: MatchBand
+    flags: list[CandidateFlag]
+    gaps: list[str]
+    draft_sentences: list[CandidateSentence]

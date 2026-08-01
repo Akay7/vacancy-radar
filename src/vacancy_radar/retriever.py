@@ -10,7 +10,13 @@ detection without pulling in correspondence.
 
 from vacancy_radar.chroma_store import ChromaStore
 from vacancy_radar.embedder import Embedder, SentenceTransformersEmbedder
-from vacancy_radar.ingest import CHROMA_PATH, VACANCIES_COLLECTION, VACANCIES_COLLECTION_METADATA
+from vacancy_radar.ingest import (
+    BULLETS_COLLECTION,
+    BULLETS_COLLECTION_METADATA,
+    CHROMA_PATH,
+    VACANCIES_COLLECTION,
+    VACANCIES_COLLECTION_METADATA,
+)
 from vacancy_radar.models import SimilarVacancy
 
 # Calibrated against the real bge-small-en-v1.5 model on data/example: unrelated postings
@@ -43,7 +49,29 @@ class Retriever:
         self._embedder = embedder or SentenceTransformersEmbedder()
 
     def query_bullets(self, query_text: str, top_k: int = 5) -> list[dict]:
-        raise NotImplementedError("M4")
+        """Retrieve the `top_k` experience bullets most similar to `query_text`.
+
+        No similarity threshold (unlike `query_similar_vacancies`): these bullets are
+        internal grounding context for /analyze, not shown to the user directly — the
+        grounding validator (`grounding.py`), not retrieval, is what gates what a report
+        can actually cite (specs/003-analyze-report-generation/research.md).
+        """
+        query_vector = self._embedder.embed([query_text])[0]
+        result = self._store.query(
+            BULLETS_COLLECTION,
+            query_embeddings=[query_vector],
+            n_results=top_k,
+            metadata=BULLETS_COLLECTION_METADATA,
+        )
+
+        ids = (result.get("ids") or [[]])[0]
+        documents = (result.get("documents") or [[]])[0]
+        distances = (result.get("distances") or [[]])[0]
+
+        return [
+            {"id": bullet_id, "text": document, "similarity": min(1.0, 1 - distance)}
+            for bullet_id, document, distance in zip(ids, documents, distances, strict=True)
+        ]
 
     def query_similar_vacancies(
         self, query_text: str, top_k: int = 3, doc_type: str | None = "posting"

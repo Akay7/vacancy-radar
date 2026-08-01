@@ -3463,6 +3463,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "chromadb" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "langchain-text-splitters" },
     { name = "pydantic" },
     { name = "pyyaml" },
@@ -3472,7 +3473,6 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -3482,7 +3482,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.40" },
     { name = "chromadb", specifier = ">=0.5" },
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "langchain-text-splitters", specifier = ">=0.3" },
     { name = "pydantic", specifier = ">=2.8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },

@@ -147,3 +147,37 @@ def test_multiple_chunks_per_vacancy_collapse_to_one_match(tmp_path, embedder):
     matches = retriever.query_similar_vacancies("Confectioner role at Wonka Industries.")
     matching_ids = [m.vacancy_id for m in matches]
     assert matching_ids.count("2026-08-01_wonka-industries_confectioner") == 1
+
+
+# --- query_bullets (specs/003-analyze-report-generation) --------------------------------
+
+
+def test_query_bullets_ranks_by_similarity(tmp_path, embedder):
+    store = ChromaStore(str(tmp_path / "chroma"))
+    ingest.ingest_experience_bullets(EXAMPLE_DIR, store=store, embedder=embedder)
+    retriever = Retriever(store=store, embedder=embedder)
+
+    results = retriever.query_bullets("FastAPI backend service with Redis caching", top_k=3)
+    assert len(results) == 3
+    assert results[0]["id"] == "bullet-0"
+    similarities = [r["similarity"] for r in results]
+    assert similarities == sorted(similarities, reverse=True)
+
+
+def test_query_bullets_returns_up_to_top_k_regardless_of_score(tmp_path, embedder):
+    # unlike query_similar_vacancies, there is no MIN_SIMILARITY cutoff here — bullets are
+    # internal LLM context, not a user-facing relevance judgment (research.md)
+    store = ChromaStore(str(tmp_path / "chroma"))
+    ingest.ingest_experience_bullets(EXAMPLE_DIR, store=store, embedder=embedder)
+    retriever = Retriever(store=store, embedder=embedder)
+
+    results = retriever.query_bullets(
+        "Completely unrelated pastry chef restaurant kitchen", top_k=5
+    )
+    assert len(results) == 5
+
+
+def test_query_bullets_empty_collection_returns_empty_list(tmp_path, embedder):
+    store = ChromaStore(str(tmp_path / "chroma"))
+    retriever = Retriever(store=store, embedder=embedder)
+    assert retriever.query_bullets("any text") == []

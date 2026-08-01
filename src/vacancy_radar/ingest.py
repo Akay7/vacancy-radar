@@ -30,6 +30,8 @@ VACANCIES_COLLECTION = "vacancies"
 # Cosine distance gives a bounded, thresholdable similarity score for /similar retrieval
 # (see specs/002-similar-retrieval/research.md) — must be set at collection-creation time.
 VACANCIES_COLLECTION_METADATA = {"hnsw:space": "cosine"}
+# Same reasoning, needed for /analyze's bullet retrieval (specs/003-analyze-report-generation).
+BULLETS_COLLECTION_METADATA = {"hnsw:space": "cosine"}
 
 NATURAL_KEY_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_[a-z0-9-]+_[a-z0-9-]+$")
 BULLET_LINE_RE = re.compile(r"^\s*[-*+]\s+(.*\S)\s*$")
@@ -167,12 +169,23 @@ def ingest_experience_bullets(
     store = store or ChromaStore(CHROMA_PATH)
     embedder = embedder or SentenceTransformersEmbedder()
 
+    # Must happen before delete_all()'s own get_or_create_collection() call, which would
+    # otherwise create the collection with the default (non-cosine) space first — Chroma
+    # ignores metadata passed to an already-existing collection.
+    store.get_or_create_collection(BULLETS_COLLECTION, metadata=BULLETS_COLLECTION_METADATA)
+
     bullets = _parse_bullets(Path(cv_dir))
     store.delete_all(BULLETS_COLLECTION)
     if bullets:
         ids = [f"bullet-{i}" for i in range(len(bullets))]
         vectors = embedder.embed(bullets)
-        store.upsert(BULLETS_COLLECTION, ids=ids, documents=bullets, embeddings=vectors)
+        store.upsert(
+            BULLETS_COLLECTION,
+            ids=ids,
+            documents=bullets,
+            embeddings=vectors,
+            collection_metadata=BULLETS_COLLECTION_METADATA,
+        )
     return len(bullets)
 
 
@@ -292,7 +305,7 @@ def reindex(cv_dir: Path, vacancy_dir: Path) -> RunSummary:
     deleting `.cache/chroma` on disk — see reset_collection's docstring for why.
     """
     store = ChromaStore(CHROMA_PATH)
-    store.reset_collection(BULLETS_COLLECTION)
+    store.reset_collection(BULLETS_COLLECTION, metadata=BULLETS_COLLECTION_METADATA)
     store.reset_collection(VACANCIES_COLLECTION, metadata=VACANCIES_COLLECTION_METADATA)
     manifest_module.delete()
     return run_ingest(cv_dir, vacancy_dir, incremental=False)
