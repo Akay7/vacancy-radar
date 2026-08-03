@@ -1,5 +1,11 @@
 from vacancy_radar import grounding
-from vacancy_radar.models import CandidateFlag, CandidateReport, CandidateSentence, Citation
+from vacancy_radar.models import (
+    CandidateFlag,
+    CandidateReport,
+    CandidateSentence,
+    Citation,
+    DraftSentence,
+)
 
 SOURCES = {
     "bullet-0": "Built a FastAPI service handling 200 req/s with async SQLAlchemy.",
@@ -141,6 +147,34 @@ def test_draft_paragraph_joins_only_grounded_sentences_in_order():
     )
     result = grounding.enforce(candidate, SOURCES)
     assert result.draft_paragraph == "I built a FastAPI service handling real load."
+
+
+def test_draft_sentences_pairs_each_kept_sentence_with_its_citation():
+    candidate = _candidate(
+        draft_sentences=[
+            CandidateSentence(
+                text="I built a FastAPI service handling real load.",
+                quote="Built a FastAPI service handling 200 req/s",
+                source_id="bullet-0",
+            ),
+            CandidateSentence(
+                text="I also invented cold fusion.",
+                quote="invented cold fusion",
+                source_id="bullet-0",
+            ),
+        ]
+    )
+    result = grounding.enforce(candidate, SOURCES)
+    assert result.draft_sentences == [
+        DraftSentence(
+            text="I built a FastAPI service handling real load.",
+            citation=Citation(
+                quote="Built a FastAPI service handling 200 req/s", source_id="bullet-0"
+            ),
+        )
+    ]
+    # the flat draft_paragraph is exactly the space-joined draft_sentences texts
+    assert result.draft_paragraph == " ".join(d.text for d in result.draft_sentences)
 
 
 def test_empty_source_registry_grounds_nothing():

@@ -9,7 +9,7 @@ surfaced (FR-008) — the rest of the report still gets built.
 import re
 from dataclasses import dataclass, field
 
-from vacancy_radar.models import CandidateReport, Citation, Flag
+from vacancy_radar.models import CandidateReport, Citation, DraftSentence, Flag
 
 
 def _normalize(text: str) -> str:
@@ -45,6 +45,7 @@ class GroundedContent:
     flags: list[Flag] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
     draft_paragraph: str = ""
+    draft_sentences: list[DraftSentence] = field(default_factory=list)
     citations: list[Citation] = field(default_factory=list)
 
 
@@ -65,15 +66,19 @@ def enforce(candidate: CandidateReport, sources: dict[str, str]) -> GroundedCont
         citations.append(Citation(quote=candidate_flag.quote, source_id=candidate_flag.source_id))
 
     sentences: list[str] = []
+    draft_sentences: list[DraftSentence] = []
     for sentence in candidate.draft_sentences:
         if not _is_grounded(sentence.quote, sentence.source_id, sources):
             continue
         sentences.append(sentence.text)
-        citations.append(Citation(quote=sentence.quote, source_id=sentence.source_id))
+        citation = Citation(quote=sentence.quote, source_id=sentence.source_id)
+        citations.append(citation)
+        draft_sentences.append(DraftSentence(text=sentence.text, citation=citation))
 
     return GroundedContent(
         flags=flags,
         gaps=candidate.gaps,
         draft_paragraph=" ".join(sentences),
+        draft_sentences=draft_sentences,
         citations=citations,
     )

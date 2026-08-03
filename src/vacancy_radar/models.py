@@ -44,12 +44,25 @@ class SimilarVacancy(BaseModel):
     is_duplicate: bool
 
 
+class DraftSentence(BaseModel):
+    """One grounded sentence of the draft paragraph, paired with the citation that grounds it.
+
+    Additive alongside `Report.draft_paragraph`/`citations` (specs/005-minimal-ui) so a UI can
+    render each sentence next to its citation without re-deriving the pairing from two
+    separately-ordered flat lists.
+    """
+
+    text: str
+    citation: Citation
+
+
 class Report(BaseModel):
     score: MatchBand
     flags: list[Flag]
     gaps: list[str]
     similar: list[SimilarVacancy]
     draft_paragraph: str
+    draft_sentences: list[DraftSentence]
     citations: list[Citation]
 
 

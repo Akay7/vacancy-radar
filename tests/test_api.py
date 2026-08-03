@@ -215,6 +215,40 @@ def test_analyze_returns_502_on_llm_provider_error(isolated_retriever) -> None:
     assert response.status_code == 502
 
 
+def test_analyze_draft_sentences_matches_draft_paragraph(
+    isolated_retriever, isolated_llm_provider
+) -> None:
+    store, embedder = isolated_retriever
+    ingest.ingest_experience_bullets(EXAMPLE_DIR, store=store, embedder=embedder)
+
+    def factory(jd_text, bullets, filter_rules):
+        bullet_id, bullet_text = bullets[0]
+        return CandidateReport(
+            match_band="good",
+            flags=[],
+            gaps=[],
+            draft_sentences=[
+                CandidateSentence(
+                    text="I have hands-on backend experience.",
+                    quote=bullet_text,
+                    source_id=bullet_id,
+                )
+            ],
+        )
+
+    isolated_llm_provider.candidate_factory = factory
+
+    response = client.post("/analyze", params={"jd_text": ACME_POSTING})
+    body = response.json()
+    assert body["draft_sentences"] == [
+        {
+            "text": "I have hands-on backend experience.",
+            "citation": body["citations"][0],
+        }
+    ]
+    assert body["draft_paragraph"] == " ".join(d["text"] for d in body["draft_sentences"])
+
+
 def test_analyze_similar_field_matches_direct_similar_call(
     isolated_retriever, isolated_llm_provider
 ) -> None:

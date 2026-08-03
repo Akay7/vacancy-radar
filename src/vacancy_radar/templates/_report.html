@@ -1,0 +1,55 @@
+<section class="report">
+  {% if not report.flags and not report.citations and not report.draft_paragraph %}
+  <p class="nothing-to-show">
+    Nothing to show yet — no experience data has been ingested, so this posting couldn't be
+    matched against anything.
+  </p>
+  {% endif %}
+
+  <p><strong>Match:</strong> {{ report.score }}</p>
+
+  {% if report.flags %}
+  <h2>Flags</h2>
+  <ul>
+    {% for flag in report.flags %}
+    <li class="flag flag-{{ flag.severity }}">
+      <strong>{{ flag.label }}</strong> — {{ flag.reason }}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if report.gaps %}
+  <h2>Gaps</h2>
+  <ul>
+    {% for gap in report.gaps %}
+    <li>{{ gap }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if report.similar %}
+  <h2>Similar vacancies</h2>
+  <ul>
+    {% for vacancy in report.similar %}
+    <li>
+      {{ vacancy.company }} — {{ vacancy.position }} ({{ vacancy.outcome }}){% if vacancy.is_duplicate %} — likely duplicate{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if report.draft_sentences %}
+  <h2>Draft opening paragraph</h2>
+  <p id="draft-paragraph-text" hidden>{{ report.draft_paragraph }}</p>
+  <button type="button" class="copy-draft" data-copy-target="draft-paragraph-text">Copy</button>
+  <ul class="draft-paragraph">
+    {% for sentence in report.draft_sentences %}
+    <li class="draft-sentence">
+      <span class="sentence-text">{{ sentence.text }}</span>
+      <span class="citation">— “{{ sentence.citation.quote }}” ({{ sentence.citation.source_id }})</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>

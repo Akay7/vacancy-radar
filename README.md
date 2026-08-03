@@ -69,7 +69,7 @@ Point `CV_DIR` / `VACANCY_DIR` in `.env` at your own git repo of career data. No
 - [x] `/similar` retrieval
 - [x] `/analyze` full report generation
 - [x] Eval harness (grounding check, retrieval recall/MRR, similar-vacancy precision, filter-consistency)
-- [ ] Minimal UI
+- [x] Minimal UI
 - [ ] `v0.1.0`
 
 ## License
