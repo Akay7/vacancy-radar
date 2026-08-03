@@ -16,3 +16,4 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check .
       - run: pytest
+      - run: python eval/run_eval.py

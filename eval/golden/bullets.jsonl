@@ -1,0 +1,6 @@
+{"id": "b-001", "query": "Experience building async Python web APIs", "expected_bullet_ids": ["bullet-0"]}
+{"id": "b-002", "query": "Leading engineering teams through infrastructure migrations", "expected_bullet_ids": ["bullet-1"]}
+{"id": "b-003", "query": "Improving automated test coverage with integration tests", "expected_bullet_ids": ["bullet-2"]}
+{"id": "b-004", "query": "Machine learning model deployment for text classification", "expected_bullet_ids": ["bullet-5"]}
+{"id": "b-005", "query": "CI/CD pipeline automation and deployment speed", "expected_bullet_ids": ["bullet-7"]}
+{"id": "b-006", "query": "Database schema design for multi-tenant SaaS billing", "expected_bullet_ids": ["bullet-3"]}

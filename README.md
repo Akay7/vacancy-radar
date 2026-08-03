@@ -68,7 +68,7 @@ Point `CV_DIR` / `VACANCY_DIR` in `.env` at your own git repo of career data. No
 - [x] Ingestion CLI (experience bullets + vacancy folders → Chroma, upsert-keyed by natural key)
 - [x] `/similar` retrieval
 - [x] `/analyze` full report generation
-- [ ] Eval harness (grounding check, retrieval recall/MRR, similar-vacancy precision, filter-consistency)
+- [x] Eval harness (grounding check, retrieval recall/MRR, similar-vacancy precision, filter-consistency)
 - [ ] Minimal UI
 - [ ] `v0.1.0`
 
