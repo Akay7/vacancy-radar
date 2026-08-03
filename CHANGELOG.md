@@ -7,6 +7,8 @@ Bumps marked **[reindex]** change the embedding model or the vector-store schema
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-03
+
 ### Added
 - Repo scaffold: FastAPI skeleton, docker-compose (app + Ollama under `--profile local`), pyproject.toml, ruff + pytest wiring.
 - Ingestion CLI (`vacancy-radar ingest` / `sync` / `reindex`): CV bullets + vacancy folders → Chroma, upsert-keyed by natural key, per-file staleness manifest for incremental `sync`. **[reindex]** (schema v1)

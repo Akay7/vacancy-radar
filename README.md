@@ -75,7 +75,7 @@ Then run `vacancy-radar ingest` once (bare) or exec it inside the running contai
 - [x] `/analyze` full report generation
 - [x] Eval harness (grounding check, retrieval recall/MRR, similar-vacancy precision, filter-consistency)
 - [x] Minimal UI
-- [ ] `v0.1.0`
+- [x] `v0.1.0`
 
 ## License
 
