@@ -12,21 +12,46 @@ Every job search involves the same manual loop, repeated per vacancy: does this 
 
 ## Architecture
 
-```
-  git-tracked source (yours):    ┌─────────────┐
-  CV bullets, markdown   ──────▶ │  ingest CLI │──┐
-  vacancy history, one           └─────────────┘  ▼
-  folder per posting     ──────▶           ┌────────────────┐
-                                           │ Chroma          │  2 collections:
-  ┌────────────────┐   retrieval          │ (embedded,      │  experience_bullets
-  │    FastAPI     │◀────────────────────▶│  regenerable    │  vacancies(+outcome)
-  │ /analyze /similar                     │  cache)         │
-  └───────┬────────┘                      └────────────────┘
-          │ JD + retrieved bullets + similar vacancies + filter rules
-          ▼
-  ┌──────────────┐
-  │ LLMProvider  │  match report: score, flags, gaps, draft paragraph
-  └──────────────┘  (grounded: every claim cites a bullet or a filter rule)
+```mermaid
+flowchart LR
+    subgraph SRC["Your data (git-tracked, private)"]
+        cv["CV bullets<br/>(markdown)"]
+        vac["vacancy folders<br/>(one per posting)"]
+    end
+
+    cli["ingest CLI<br/>ingest / sync / reindex"]
+    cv --> cli
+    vac --> cli
+
+    subgraph STORE["Chroma<br/>(embedded, regenerable cache)"]
+        bullets[("experience_bullets")]
+        vacancies[("vacancies<br/>(+outcome)")]
+    end
+    cli --> bullets
+    cli --> vacancies
+
+    ui["Browser UI<br/>GET / · POST /ui/analyze"]
+    analyze["POST /analyze"]
+    similar["POST /similar"]
+    ui --> analyze
+
+    bullets --> analyze
+    vacancies --> analyze
+    vacancies --> similar
+
+    llm["LLMProvider<br/>Claude API or Ollama"]
+    analyze -->|JD + bullets + similar vacancies + filter rules| llm
+    llm -->|grounded claims only| analyze
+
+    report(["match report<br/>score · flags · gaps · draft paragraph"])
+    dupe(["ranked similar vacancies<br/>(dedupe check)"])
+    analyze --> report
+    similar --> dupe
+
+    eval["eval/run_eval.py<br/>maintainer / CI only"]
+    eval -.-> bullets
+    eval -.-> vacancies
+    eval -.-> llm
 ```
 
 **Endpoints**
