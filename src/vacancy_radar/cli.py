@@ -50,6 +50,15 @@ def main(argv: list[str] | None = None) -> int:
 
     cv_dir, vacancy_dir = _dirs_from_env()
 
+    if not vacancy_dir.is_dir():
+        print(
+            f"error: VACANCY_DIR '{vacancy_dir}' does not exist — check your VACANCY_DIR "
+            "configuration (see .env.example). A missing CV_DIR is tolerated (nothing to "
+            "ground reports in yet), but without vacancy history there is nothing to ingest.",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.command == "ingest":
         summary = ingest.run_ingest(cv_dir, vacancy_dir, incremental=False)
     elif args.command == "sync":

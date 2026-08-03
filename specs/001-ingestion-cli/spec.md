@@ -99,8 +99,15 @@ ingest against the same source data would produce.
 
 ### Edge Cases
 
-- What happens when `CV_DIR` or `VACANCY_DIR` is empty or does not exist yet? The command
-  should complete without error, reporting zero items ingested, not fail.
+- What happens when `CV_DIR` is empty or does not exist yet? The command should complete
+  without error, reporting zero bullets ingested, not fail — a CV isn't required to start
+  logging vacancy history.
+- What happens when `VACANCY_DIR` does not exist at all? **Amended** (post-v0.1.0, per
+  maintainer decision): this is now a hard error (non-zero exit, clear stderr message) rather
+  than a silent zero-item state — unlike a missing CV, there is nothing useful this tool can do
+  without vacancy history, and a missing directory is far more likely to mean a misconfigured
+  `VACANCY_DIR` than a deliberately-empty one. An `VACANCY_DIR` that exists but is genuinely
+  empty (no vacancy folders yet) is still a valid zero-item state, not an error.
 - How does the system handle a vacancy folder whose name doesn't follow the
   `YYYY-MM-DD_company-slug_position-slug` natural-key convention? It should be reported as a
   skipped/invalid folder with a clear reason, without stopping ingestion of the remaining
@@ -137,8 +144,10 @@ ingest against the same source data would produce.
   rebuilds it from source data, without modifying or deleting any source files.
 - **FR-006**: Each of the ingest, sync, and reindex commands MUST report a summary of items
   processed (created, updated, skipped, invalid) when it completes.
-- **FR-007**: The system MUST treat an empty or missing `CV_DIR`/`VACANCY_DIR` as a valid
-  zero-item state, not an error.
+- **FR-007**: The system MUST treat an empty `CV_DIR`/`VACANCY_DIR`, or a missing `CV_DIR`, as
+  a valid zero-item state, not an error. **Amended** (post-v0.1.0): a missing `VACANCY_DIR`
+  (the directory does not exist at all) is a hard error instead — see the Edge Cases entry
+  above for the reasoning.
 - **FR-008**: The system MUST detect a vacancy folder that is missing required `vacancy.yaml`
   fields or does not follow the natural-key naming convention, report it as invalid with a
   clear reason, and continue processing the remaining folders rather than aborting the run.

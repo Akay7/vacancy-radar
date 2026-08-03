@@ -15,10 +15,13 @@ already defined in `.env.example`.
 new/changed-only logic (FR-004), it's just that on a fresh cache everything is "new." Exists as
 a separate, memorable entry point for first-time setup (FR-001).
 
-**Exit codes**: `0` on success (including zero items found, FR-007); non-zero only on an
-unrecoverable error (e.g., `VACANCY_DIR` path exists but is not readable) — per-folder
-validation failures (FR-008) and conflicts (FR-009) do NOT cause a non-zero exit, they're
-reported in the summary.
+**Exit codes**: `0` on success, including a missing/empty `CV_DIR` or an empty `VACANCY_DIR`
+(zero items found, FR-007). Non-zero when `VACANCY_DIR` does not exist at all — checked before
+any of the three subcommands run, printing a clear stderr message rather than silently
+reporting zero items (**amended** post-v0.1.0; see spec.md's FR-007) — or on another
+unrecoverable error (e.g., `VACANCY_DIR` path exists but is not readable). Per-folder validation
+failures (FR-008) and conflicts (FR-009) do NOT cause a non-zero exit, they're reported in the
+summary.
 
 **Stdout contract**: a human-readable run summary — counts for bullets ingested, vacancies
 created, vacancies invalid (with folder + reason), vacancies conflicting (FR-006). Machine

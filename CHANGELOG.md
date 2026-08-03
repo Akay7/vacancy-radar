@@ -7,6 +7,9 @@ Bumps marked **[reindex]** change the embedding model or the vector-store schema
 
 ## [Unreleased]
 
+### Changed
+- `vacancy-radar ingest`/`sync`/`reindex` now exit non-zero with a clear message if `VACANCY_DIR` doesn't exist at all, instead of silently reporting zero items — a missing directory is far more likely to be a misconfiguration than a deliberately-empty one. A missing `CV_DIR` is still tolerated (FR-007, unchanged): the tool can log vacancy history without a CV, just not the reverse.
+
 ## [0.1.0] - 2026-08-03
 
 ### Added

@@ -100,6 +100,28 @@ def test_sync_after_compat_mismatch_reembeds_everything(project_dir, capsys):
     assert "vacancies_skipped=0" in captured.out
 
 
+@pytest.mark.parametrize("command", ["ingest", "sync", "reindex"])
+def test_command_errors_when_vacancy_dir_missing(project_dir, monkeypatch, capsys, command):
+    # Without any vacancy history, the tool can't do anything useful — this is a hard error,
+    # unlike a missing CV_DIR (see test_ingest_tolerates_missing_cv_dir).
+    monkeypatch.setenv("VACANCY_DIR", "no-such-vacancy-dir")
+    exit_code = cli.main([command])
+    assert exit_code != 0
+    captured = capsys.readouterr()
+    assert "VACANCY_DIR" in captured.err
+    assert "no-such-vacancy-dir" in captured.err
+
+
+def test_ingest_tolerates_missing_cv_dir(project_dir, monkeypatch, capsys):
+    # A missing CV_DIR is still a legitimate zero-item state (FR-007) — the CLI can still
+    # ingest vacancy history without any experience bullets to draw on yet.
+    monkeypatch.setenv("CV_DIR", "no-such-cv-dir")
+    exit_code = cli.main(["ingest"])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "bullets_ingested=0" in captured.out
+
+
 def _hash_tree(root: Path) -> dict[str, str]:
     import hashlib
 
