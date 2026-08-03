@@ -7,8 +7,17 @@ Bumps marked **[reindex]** change the embedding model or the vector-store schema
 
 ## [Unreleased]
 
+### Added
+- Vacancy upload UI (`GET /ingest`, `POST /ui/ingest/draft`, `POST /ui/ingest/confirm`): upload a job posting/offer as an image, PDF, DOCX, or plain text file; company/position/date are drafted from it via the configured `LLMProvider` for review, outcome is always typed by hand, and confirming writes a real vacancy folder into `VACANCY_DIR` and embeds it immediately. Existing folder-based ingestion (`sources/`/`correspondence/`) now accepts the same image/PDF/DOCX formats.
+- Vision-based drafting for image uploads (specs/007-vision-drafting): company/position/date for a photographed or screenshotted posting are now drafted from the configured `LLMProvider` reading the image directly (Claude's vision API, or Ollama's `images` field for a vision-capable local model), rather than local OCR. If the configured backend can't interpret the image, or the attempt fails, the maintainer sees a specific message explaining that image-based drafting isn't available with the current setup, and can still fill in every field manually.
+
 ### Changed
+- `docker-compose.yml`'s `data/user` mount is now read-write (was read-only) — the upload feature above is the first thing that ever needs to write to the maintainer's real vacancy history; `data/example` stays read-only.
 - `vacancy-radar ingest`/`sync`/`reindex` now exit non-zero with a clear message if `VACANCY_DIR` doesn't exist at all, instead of silently reporting zero items — a missing directory is far more likely to be a misconfiguration than a deliberately-empty one. A missing `CV_DIR` is still tolerated (FR-007, unchanged): the tool can log vacancy history without a CV, just not the reverse.
+
+### Removed
+- The M1-scaffold `POST /ingest/vacancy` stub (always returned `501`, never implemented) — superseded by the upload UI above.
+- Local OCR (`pytesseract`, `Pillow`, and the Dockerfile's `tesseract-ocr` system package) — superseded by vision-based drafting above. Image uploads no longer have any local text-extraction step; PDF/DOCX (`pypdf`/`python-docx`) are unaffected.
 
 ## [0.1.0] - 2026-08-03
 

@@ -9,7 +9,12 @@ from vacancy_radar import ingest
 from vacancy_radar.api import app, get_llm_provider, get_retriever
 from vacancy_radar.chroma_store import ChromaStore
 from vacancy_radar.llm.base import LLMProvider, LLMProviderError
-from vacancy_radar.models import CandidateFlag, CandidateReport, CandidateSentence
+from vacancy_radar.models import (
+    CandidateFlag,
+    CandidateReport,
+    CandidateSentence,
+    DraftVacancyMetadata,
+)
 from vacancy_radar.retriever import Retriever
 
 client = TestClient(app)
@@ -29,6 +34,14 @@ class FakeLLMProvider(LLMProvider):
     def analyze(self, jd_text, experience_bullets, filter_rules) -> CandidateReport:
         self.call_count += 1
         return self.candidate_factory(jd_text, experience_bullets, filter_rules)
+
+    def draft_vacancy_metadata(
+        self,
+        document_text: str,
+        image_bytes: bytes | None = None,
+        image_media_type: str | None = None,
+    ) -> DraftVacancyMetadata:
+        raise NotImplementedError("not exercised by this test file's fakes")
 
 
 def _empty_candidate(jd_text, bullets, filter_rules) -> CandidateReport:

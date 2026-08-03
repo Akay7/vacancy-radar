@@ -91,3 +91,15 @@ class CandidateReport(BaseModel):
     flags: list[CandidateFlag]
     gaps: list[str]
     draft_sentences: list[CandidateSentence]
+
+
+class DraftVacancyMetadata(BaseModel):
+    """LLM-proposed company/position/date for a newly uploaded vacancy document
+    (specs/006-vacancy-upload) — reviewed and editable by the maintainer before anything is
+    saved. No `outcome` field: an initial posting/offer document can't reflect an outcome that
+    hasn't happened yet, so the maintainer always sets it directly (FR-003).
+    """
+
+    company: str
+    position: str
+    date: date

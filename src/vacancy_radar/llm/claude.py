@@ -6,13 +6,22 @@ combined with output_config.format), and a structured multi-field report is wort
 than native citation metadata — see specs/003-analyze-report-generation/research.md.
 """
 
+import base64
 import json
+from datetime import date
 
 import anthropic
+from pydantic import ValidationError
 
 from vacancy_radar.llm.base import LLMProvider, LLMProviderError
-from vacancy_radar.llm.prompts import CANDIDATE_REPORT_JSON_SCHEMA, build_analyze_prompt
-from vacancy_radar.models import CandidateReport
+from vacancy_radar.llm.prompts import (
+    CANDIDATE_REPORT_JSON_SCHEMA,
+    DRAFT_METADATA_JSON_SCHEMA,
+    build_analyze_prompt,
+    build_draft_metadata_prompt,
+    build_draft_metadata_vision_prompt,
+)
+from vacancy_radar.models import CandidateReport, DraftVacancyMetadata
 
 
 class ClaudeProvider(LLMProvider):
@@ -44,3 +53,78 @@ class ClaudeProvider(LLMProvider):
 
         text = next(block.text for block in response.content if block.type == "text")
         return CandidateReport.model_validate(json.loads(text))
+
+    def draft_vacancy_metadata(
+        self,
+        document_text: str,
+        image_bytes: bytes | None = None,
+        image_media_type: str | None = None,
+    ) -> DraftVacancyMetadata:
+        if image_bytes is not None:
+            return self._draft_from_image(image_bytes, image_media_type)
+        return self._draft_from_text(document_text)
+
+    def _draft_from_text(self, document_text: str) -> DraftVacancyMetadata:
+        prompt = build_draft_metadata_prompt(document_text)
+
+        try:
+            response = self._client.messages.create(
+                model=self.model,
+                max_tokens=1024,
+                output_config={
+                    "format": {"type": "json_schema", "schema": DRAFT_METADATA_JSON_SCHEMA}
+                },
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except (anthropic.APIConnectionError, anthropic.AuthenticationError) as exc:
+            raise LLMProviderError(f"Claude API unreachable/misconfigured: {exc}") from exc
+
+        text = next(block.text for block in response.content if block.type == "text")
+        return self._parse_draft(text)
+
+    def _draft_from_image(
+        self, image_bytes: bytes, image_media_type: str | None
+    ) -> DraftVacancyMetadata:
+        """Vision-based drafting for image uploads (specs/007-vision-drafting) — no local OCR
+        fallback exists, so any failure here surfaces to the caller as LLMProviderError."""
+        prompt = build_draft_metadata_vision_prompt()
+        image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+
+        try:
+            response = self._client.messages.create(
+                model=self.model,
+                max_tokens=1024,
+                output_config={
+                    "format": {"type": "json_schema", "schema": DRAFT_METADATA_JSON_SCHEMA}
+                },
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": image_media_type,
+                                    "data": image_b64,
+                                },
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+            )
+        except anthropic.APIError as exc:
+            raise LLMProviderError(f"Claude vision request failed: {exc}") from exc
+
+        text = next(block.text for block in response.content if block.type == "text")
+        try:
+            return self._parse_draft(text)
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise LLMProviderError(f"Claude vision response was not usable: {exc}") from exc
+
+    def _parse_draft(self, text: str) -> DraftVacancyMetadata:
+        data = json.loads(text)
+        if not data.get("date"):
+            data["date"] = date.today().isoformat()
+        return DraftVacancyMetadata.model_validate(data)

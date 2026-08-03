@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vacancy Radar — Log a vacancy</title>
+  <script src="/static/htmx.min.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+    input[type="file"] { display: block; margin: 0.6rem 0; }
+    button { font-size: 1rem; padding: 0.5rem 1.2rem; margin-top: 0.5rem; }
+    label { display: block; margin-top: 0.8rem; font-weight: 600; }
+    input[type="text"], input[type="date"] { width: 100%; font-size: 1rem; padding: 0.4rem; box-sizing: border-box; }
+    .error { color: #b4530a; }
+  </style>
+</head>
+<body>
+  <h1>Log a vacancy</h1>
+  <p>Upload a job posting or offer document — image, PDF, DOCX, or plain text.</p>
+
+  <form hx-post="/ui/ingest/draft" hx-target="#result" hx-swap="innerHTML"
+        hx-encoding="multipart/form-data">
+    <input type="file" name="file" required />
+    <button type="submit">Draft vacancy</button>
+  </form>
+
+  <div id="result"></div>
+</body>
+</html>

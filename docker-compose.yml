@@ -6,7 +6,8 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data/user:/data/user:ro
+      # read-write: specs/006-vacancy-upload writes new vacancy folders here (confirmed uploads)
+      - ./data/user:/data/user
       - ./data/example:/data/example:ro
       - ./.cache:/app/.cache
 

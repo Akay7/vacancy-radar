@@ -102,3 +102,68 @@ Respond with ONLY a JSON object matching this shape (no other text):
   "gaps": [str],
   "draft_sentences": [{{"text": str, "quote": str, "source_id": str}}]
 }}"""
+
+
+DRAFT_METADATA_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "company": {"type": "string"},
+        "position": {"type": "string"},
+        "date": {"type": "string"},
+    },
+    "required": ["company", "position", "date"],
+    "additionalProperties": False,
+}
+
+
+def build_draft_metadata_prompt(document_text: str) -> str:
+    return f"""\
+You are reading an uploaded job posting or offer document to help someone log it as a vacancy
+record. Extract only what the document actually states — do not invent a company, position, or
+date that isn't there.
+
+# Document text
+{document_text}
+
+# Output rules
+- "company": the hiring company's name, exactly as it appears in the document.
+- "position": the job title/position, exactly as it appears in the document.
+- "date": the posting or offer date, in YYYY-MM-DD format, if the document states one — an
+  empty string "" if no date is stated. Do not guess a date that isn't in the document; the
+  person reviewing this draft will fill in a date themselves if you leave it blank.
+- Every field is reviewed and can be corrected by a person before it's saved — a reasonable
+  best guess is fine, but never fabricate a specific value the document doesn't support; leave
+  a field as an empty string "" instead.
+
+Respond with ONLY a JSON object matching this shape (no other text):
+{{
+  "company": str,
+  "position": str,
+  "date": str
+}}"""
+
+
+def build_draft_metadata_vision_prompt() -> str:
+    """Prompt for image uploads (specs/007-vision-drafting) — no OCR'd text is available;
+    the model reads the attached image directly instead of any extracted text."""
+    return """\
+You are looking at an uploaded photo or screenshot of a job posting or offer, to help someone
+log it as a vacancy record. Extract only what the image actually shows — do not invent a
+company, position, or date that isn't legible in it.
+
+# Output rules
+- "company": the hiring company's name, exactly as it appears in the image.
+- "position": the job title/position, exactly as it appears in the image.
+- "date": the posting or offer date, in YYYY-MM-DD format, if the image shows one — an empty
+  string "" if no date is legible. Do not guess a date that isn't shown; the person reviewing
+  this draft will fill in a date themselves if you leave it blank.
+- Every field is reviewed and can be corrected by a person before it's saved — a reasonable
+  best guess is fine, but never fabricate a specific value the image doesn't support; leave a
+  field as an empty string "" instead.
+
+Respond with ONLY a JSON object matching this shape (no other text):
+{
+  "company": str,
+  "position": str,
+  "date": str
+}"""

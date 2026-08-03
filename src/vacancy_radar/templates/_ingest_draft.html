@@ -1,0 +1,22 @@
+{% if message %}
+<p class="error">{{ message }}</p>
+{% endif %}
+
+<form hx-post="/ui/ingest/confirm" hx-target="#result" hx-swap="innerHTML">
+  <input type="hidden" name="upload_token" value="{{ upload_token }}" />
+  <input type="hidden" name="original_filename" value="{{ original_filename }}" />
+
+  <label for="company">Company</label>
+  <input type="text" id="company" name="company" value="{{ draft.company if draft else '' }}" required />
+
+  <label for="position">Position</label>
+  <input type="text" id="position" name="position" value="{{ draft.position if draft else '' }}" required />
+
+  <label for="date">Date</label>
+  <input type="date" id="date" name="date" value="{{ draft.date.isoformat() if draft else '' }}" required />
+
+  <label for="outcome">Outcome</label>
+  <input type="text" id="outcome" name="outcome" placeholder="e.g. applied" required />
+
+  <button type="submit">Confirm &amp; Save</button>
+</form>

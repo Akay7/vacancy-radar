@@ -11,7 +11,7 @@ filter rule is, per Constitution II) and there's nothing for the LLM to ground i
 
 from abc import ABC, abstractmethod
 
-from vacancy_radar.models import CandidateReport
+from vacancy_radar.models import CandidateReport, DraftVacancyMetadata
 
 
 class LLMProviderError(Exception):
@@ -27,4 +27,25 @@ class LLMProvider(ABC):
         filter_rules: str,
     ) -> CandidateReport:
         """Produce a candidate report for a job description — not yet grounding-validated."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def draft_vacancy_metadata(
+        self,
+        document_text: str,
+        image_bytes: bytes | None = None,
+        image_media_type: str | None = None,
+    ) -> DraftVacancyMetadata:
+        """Propose company/position/date from an uploaded vacancy document.
+
+        The maintainer reviews and edits every field before anything is saved
+        (specs/006-vacancy-upload) — this is a best-effort draft, not a validated fact.
+
+        `image_bytes`/`image_media_type` are set together for image uploads
+        (specs/007-vision-drafting) — `document_text` is always "" in that case, since local
+        OCR has been removed; the image itself is read directly by the LLM. When set, the
+        implementation MUST attempt vision-based drafting and raise `LLMProviderError` on any
+        failure (no vision support, backend error, malformed output) rather than falling back
+        to a text-based attempt — there is no OCR text to fall back to.
+        """
         raise NotImplementedError

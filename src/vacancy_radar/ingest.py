@@ -18,11 +18,15 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from vacancy_radar import compat
+from vacancy_radar import compat, documents
 from vacancy_radar import manifest as manifest_module
 from vacancy_radar.chroma_store import ChromaStore
 from vacancy_radar.embedder import Embedder, SentenceTransformersEmbedder
 from vacancy_radar.models import VacancyRecord
+
+# Extensions read via documents.extract_text() (specs/006-vacancy-upload) rather than a plain
+# text read — everything else keeps the original .read_text() path unchanged.
+NON_TEXT_SOURCE_EXTENSIONS = {".pdf", ".docx", ".png", ".jpg", ".jpeg"}
 
 CHROMA_PATH = ".cache/chroma"
 BULLETS_COLLECTION = "experience_bullets"
@@ -102,6 +106,14 @@ def load_vacancy_record(folder: Path) -> tuple[VacancyRecord | None, str | None]
     return record, None
 
 
+def _read_source_document(file_path: Path) -> str:
+    """Text content for one sources/correspondence file — extracted via documents.extract_text()
+    for image/PDF/DOCX (specs/006-vacancy-upload), otherwise a plain text read, unchanged."""
+    if file_path.suffix.lower() in NON_TEXT_SOURCE_EXTENSIONS:
+        return documents.extract_text(file_path)
+    return file_path.read_text()
+
+
 def chunk_vacancy_folder(folder: Path, key: str, record: VacancyRecord) -> list[dict]:
     """Split one vacancy folder into (id, document, metadata) chunks, one per source file."""
     metadata_base = {
@@ -128,7 +140,7 @@ def chunk_vacancy_folder(folder: Path, key: str, record: VacancyRecord) -> list[
             chunks.append(
                 {
                     "id": f"{key}/{subdir}/{file_path.name}",
-                    "document": file_path.read_text(),
+                    "document": _read_source_document(file_path),
                     "metadata": {**metadata_base, "doc_type": doc_type},
                 }
             )

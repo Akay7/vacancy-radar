@@ -1,4 +1,5 @@
 import json
+from datetime import date
 
 import anthropic
 import httpx
@@ -24,8 +25,10 @@ class _FakeMessages:
         self._response = response
         self._error = error
         self.last_kwargs: dict | None = None
+        self.call_count = 0
 
     def create(self, **kwargs):
+        self.call_count += 1
         self.last_kwargs = kwargs
         if self._error:
             raise self._error
@@ -92,3 +95,77 @@ def test_analyze_raises_llm_provider_error_on_connection_failure():
 
     with pytest.raises(LLMProviderError):
         provider.analyze("JD", [("bullet-0", "text")], "")
+
+
+VALID_DRAFT_JSON = json.dumps(
+    {"company": "Acme Corp", "position": "Backend Engineer", "date": "2026-01-15"}
+)
+
+
+def test_draft_vacancy_metadata_parses_well_formed_response():
+    fake_client = _FakeClient(response=_FakeResponse([_TextBlock(VALID_DRAFT_JSON)]))
+    provider = ClaudeProvider(client=fake_client)
+
+    result = provider.draft_vacancy_metadata("Acme Corp is hiring a Backend Engineer...")
+
+    assert result.company == "Acme Corp"
+    assert result.position == "Backend Engineer"
+    assert result.date.isoformat() == "2026-01-15"
+
+
+def test_draft_vacancy_metadata_defaults_date_to_today_when_blank():
+    blank_date_json = json.dumps(
+        {"company": "Acme Corp", "position": "Backend Engineer", "date": ""}
+    )
+    fake_client = _FakeClient(response=_FakeResponse([_TextBlock(blank_date_json)]))
+    provider = ClaudeProvider(client=fake_client)
+
+    result = provider.draft_vacancy_metadata("some document text with no date mentioned")
+
+    assert result.date == date.today()
+
+
+def test_draft_vacancy_metadata_raises_llm_provider_error_on_connection_failure():
+    error = anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com"))
+    fake_client = _FakeClient(error=error)
+    provider = ClaudeProvider(client=fake_client)
+
+    with pytest.raises(LLMProviderError):
+        provider.draft_vacancy_metadata("some document text")
+
+
+# --- Vision-based drafting for image uploads (specs/007-vision-drafting) -----------------
+
+
+def test_draft_vacancy_metadata_sends_vision_content_block_for_image():
+    fake_client = _FakeClient(response=_FakeResponse([_TextBlock(VALID_DRAFT_JSON)]))
+    provider = ClaudeProvider(client=fake_client)
+
+    result = provider.draft_vacancy_metadata(
+        "", image_bytes=b"fake-png-bytes", image_media_type="image/png"
+    )
+
+    kwargs = fake_client.messages.last_kwargs
+    content = kwargs["messages"][0]["content"]
+    assert isinstance(content, list)
+    image_block = next(block for block in content if block["type"] == "image")
+    assert image_block["source"]["type"] == "base64"
+    assert image_block["source"]["media_type"] == "image/png"
+    text_block = next(block for block in content if block["type"] == "text")
+    assert isinstance(text_block["text"], str) and text_block["text"]
+    assert kwargs["output_config"]["format"]["type"] == "json_schema"
+    assert result.company == "Acme Corp"
+
+
+def test_draft_vacancy_metadata_raises_llm_provider_error_on_vision_failure_no_fallback():
+    error = anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com"))
+    fake_client = _FakeClient(error=error)
+    provider = ClaudeProvider(client=fake_client)
+
+    with pytest.raises(LLMProviderError):
+        provider.draft_vacancy_metadata(
+            "", image_bytes=b"fake-png-bytes", image_media_type="image/png"
+        )
+
+    # exactly one attempt was made — no second/fallback request
+    assert fake_client.messages.call_count == 1

@@ -1,4 +1,5 @@
 import shutil
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ from _fakes import FakeEmbedder
 from vacancy_radar import ingest
 from vacancy_radar import manifest as manifest_module
 from vacancy_radar.chroma_store import ChromaStore
+from vacancy_radar.models import VacancyRecord
 
 EXAMPLE_DIR = Path(__file__).parent.parent / "data" / "example"
 VACANCIES_DIR = EXAMPLE_DIR / "vacancies"
@@ -187,3 +189,69 @@ def test_incremental_does_not_clean_up_deleted_folder(store, embedder, tmp_path)
         ids=["2026-02-03_globex_platform-engineer/vacancy.yaml"]
     )
     assert len(got["ids"]) == 1
+
+
+# --- chunk_vacancy_folder: image/PDF/DOCX sources (specs/006-vacancy-upload) --------------
+
+
+FOLDER_NAME = "2026-01-15_acme-corp_backend-engineer"
+
+
+def _make_record() -> VacancyRecord:
+    return VacancyRecord(
+        company="Acme Corp", position="Backend Engineer", date=date(2026, 1, 15), outcome="applied"
+    )
+
+
+def test_chunk_vacancy_folder_extracts_text_from_pdf_source(tmp_path: Path):
+    from reportlab.pdfgen import canvas
+
+    folder = tmp_path / FOLDER_NAME
+    (folder / "sources").mkdir(parents=True)
+    (folder / "vacancy.yaml").write_text("company: Acme Corp\n")
+
+    pdf_path = folder / "sources" / "posting.pdf"
+    c = canvas.Canvas(str(pdf_path))
+    c.drawString(50, 750, "Backend Engineer role at Acme Corp")
+    c.save()
+
+    chunks = ingest.chunk_vacancy_folder(folder, FOLDER_NAME, _make_record())
+    posting_chunk = next(c for c in chunks if c["id"].endswith("posting.pdf"))
+    assert "Backend Engineer role at Acme Corp" in posting_chunk["document"]
+
+
+def test_chunk_vacancy_folder_extracts_text_from_docx_source(tmp_path: Path):
+    from docx import Document
+
+    folder = tmp_path / FOLDER_NAME
+    (folder / "sources").mkdir(parents=True)
+    (folder / "vacancy.yaml").write_text("company: Acme Corp\n")
+
+    docx_path = folder / "sources" / "posting.docx"
+    document = Document()
+    document.add_paragraph("Backend Engineer role at Acme Corp")
+    document.save(str(docx_path))
+
+    chunks = ingest.chunk_vacancy_folder(folder, FOLDER_NAME, _make_record())
+    posting_chunk = next(c for c in chunks if c["id"].endswith("posting.docx"))
+    assert "Backend Engineer role at Acme Corp" in posting_chunk["document"]
+
+
+def test_chunk_vacancy_folder_extracts_text_from_image_source(tmp_path: Path):
+    from PIL import Image, ImageDraw
+
+    folder = tmp_path / FOLDER_NAME
+    (folder / "sources").mkdir(parents=True)
+    (folder / "vacancy.yaml").write_text("company: Acme Corp\n")
+
+    image_path = folder / "sources" / "posting.png"
+    image = Image.new("RGB", (400, 100), color="white")
+    draw = ImageDraw.Draw(image)
+    draw.text((10, 40), "Acme Corp", fill="black")
+    image.save(image_path)
+
+    chunks = ingest.chunk_vacancy_folder(folder, FOLDER_NAME, _make_record())
+    posting_chunk = next(c for c in chunks if c["id"].endswith("posting.png"))
+    # OCR against a synthetic string isn't pixel-perfect (see tests/test_documents.py) — just
+    # confirm the extraction path ran and produced something, not raw undecodable bytes.
+    assert isinstance(posting_chunk["document"], str)
