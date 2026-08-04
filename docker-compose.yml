@@ -13,7 +13,7 @@ services:
       - ./data/example:/data/example:ro,z
       - ./.cache:/app/.cache:z
 
-  # Leave ANTHROPIC_API_KEY blank in .env to use this instead of the Claude API
+  # Set LLM_PROVIDER=ollama LLM_MODEL=<model> in .env to use this instead of a hosted provider
   ollama:
     image: docker.io/ollama/ollama:latest
     profiles: ["local"]

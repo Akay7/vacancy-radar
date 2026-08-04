@@ -1,13 +1,24 @@
-"""Unified LLM provider configuration, read once from the environment.
+"""Unified LLM provider settings, read once from the environment.
 
-`ANTHROPIC_API_KEY`/`OLLAMA_MODEL`/`OLLAMA_HOST` were previously each read directly via
-`os.environ.get(...)` in `get_llm_provider()`. `LLMConfig` is the single place that reads and
-types them.
+`LLM_PROVIDER` and `LLM_MODEL` together select the chat model backend — e.g.
+`LLM_PROVIDER=anthropic LLM_MODEL=claude-opus-5` or `LLM_PROVIDER=ollama LLM_MODEL=qwen3:8b` —
+the exact `model_provider`/`model` pair LangChain's own `init_chat_model()` already knows how to
+resolve to a concrete `BaseChatModel`. There is no default and no fallback: this project doesn't
+special-case Claude or Ollama anywhere, so it doesn't get to assume one of them either — every
+deployment sets both explicitly. Any provider LangChain supports works here, as long as its
+`langchain-<provider>` package is installed (`init_chat_model()` raises a clear
+`pip install langchain-<provider>` error otherwise); adding a new backend is a config change,
+not a code change.
 
-No `LLM_PROVIDER` selector: which provider runs is inferred from whether `anthropic_api_key` is
-set — set it to use Claude, leave it unset for a fully local/offline setup via Ollama (whose
-`ollama_model`/`ollama_host` defaults always work, so there is no "missing config" state to fail
-on for that path).
+`LLM_BASE_URL` is a vendor-neutral override for self-hosted/local backends — e.g.
+`langchain-ollama`, unlike most providers, which read their own credential from a standard env
+var the way `ChatAnthropic` reads `ANTHROPIC_API_KEY`, has no such env var for its base URL, so
+it must be passed in explicitly. Left unset, each provider falls back to its own default (Ollama
+to `http://localhost:11434`); which providers actually accept a `base_url` override is
+`get_llm_provider()`'s concern, not this module's.
+
+This class only reads settings — deciding what to do with them (building the actual chat model)
+is `get_llm_provider()`'s job (api.py), not this module's.
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,6 +27,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class LLMConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
-    anthropic_api_key: str | None = None
-    ollama_model: str = "qwen3:8b"
-    ollama_host: str = "http://localhost:11434"
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    llm_base_url: str | None = None

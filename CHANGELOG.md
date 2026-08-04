@@ -9,7 +9,7 @@ Bumps marked **[reindex]** change the embedding model or the vector-store schema
 
 ### Changed
 - **Breaking:** the JSON API moved under `/api/*` (`/analyze` → `/api/analyze`, `/similar` → `/api/similar`); the browser UI's HTML routes dropped their `/ui/` prefix (`/ui/analyze` → `/analyze`, `/ui/ingest/draft` → `/ingest/draft`, `/ui/ingest/confirm` → `/ingest/confirm`). One rule now holds for the whole app: `/api/*` is the JSON contract, everything else is a page (specs/008-ingest-flow-clarity).
-- LLM provider selection is no longer a separate `LLM_PROVIDER` switch — whichever is configured just runs: `ANTHROPIC_API_KEY` set means Claude, blank means Ollama. Provider config is read from one place (`llm/config.py`, via `pydantic-settings`) instead of being duplicated across call sites.
+- **Breaking:** LLM backend selection is now two required env vars, `LLM_PROVIDER` and `LLM_MODEL` (e.g. `LLM_PROVIDER=anthropic LLM_MODEL=claude-opus-5` or `LLM_PROVIDER=ollama LLM_MODEL=qwen3:8b`), plus an optional vendor-neutral `LLM_BASE_URL` (renamed from `OLLAMA_HOST`) for self-hosted backends — resolved via LangChain's `init_chat_model()`, so any provider LangChain supports now works, as long as its `langchain-<provider>` package is installed, not just Claude/Ollama. Replaces the previous `ANTHROPIC_API_KEY`-presence-inferred switch (and, before that, the combined `LLM_MODEL=provider:model` string); existing `.env` files must set `LLM_PROVIDER`/`LLM_MODEL` explicitly. Settings are read from one place (`LLMConfig` in `llm/config.py`, via `pydantic-settings`); building the actual chat model from them is `get_llm_provider()`'s job (`api.py`), not the settings class's.
 
 ### Added
 - Persistent navigation between the paste-a-posting screen and the log-a-vacancy screen — neither page requires already knowing the other's URL, and each page marks which one you're on.
@@ -19,6 +19,7 @@ Bumps marked **[reindex]** change the embedding model or the vector-store schema
 - `vacancy-radar ingest`/`sync`/`reindex` output is now plain-language (which `CV_DIR`/`VACANCY_DIR` were scanned, grammatically correct counts) instead of a dense `key=value` line.
 - LLM generation and retrieval now run through LangChain (`ChatAnthropic`/`ChatOllama` for generation, `langchain-chroma`'s `Chroma` for retrieval) instead of hand-rolled per-vendor clients, per the amended constitution (Principle III) — no change to the grounded match-report/drafting behavior itself (verified at parity against the eval harness).
 - `ClaudeProvider`/`OllamaProvider` collapsed into one `LLMProvider(chat_model)` class, since both had converged to near-identical wrappers around `BaseChatModel`; every generation call (`/analyze`, vacancy-metadata drafting, vision text extraction) is now a chained LangChain `Runnable` (`ChatPromptTemplate`/`RunnableLambda` piped into the chat model) invoked the same way, instead of building a prompt string and calling a separate structured-output helper.
+- `LLMConfig` (`llm/config.py`) now holds settings only; the `ChatAnthropic`/`ChatOllama` construction/selection logic (`init_chat_model()`) lives in `get_llm_provider()` (`api.py`) instead, so reading config and deciding what to do with it aren't mixed into one class.
 
 ## [0.1.0] - 2026-08-04
 

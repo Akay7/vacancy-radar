@@ -280,11 +280,12 @@ def test_analyze_similar_field_matches_direct_similar_call(
     assert analyze_response.json()["similar"] == similar_response.json()
 
 
-# --- LLM provider selection: inferred from ANTHROPIC_API_KEY presence, no separate switch -
+# --- LLM provider selection: resolved from the required LLM_PROVIDER/LLM_MODEL env vars ----
 
 
-def test_get_llm_provider_returns_claude_when_api_key_present(monkeypatch) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
+def test_get_llm_provider_resolves_anthropic(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("LLM_MODEL", "claude-opus-5")
 
     provider = get_llm_provider()
 
@@ -292,10 +293,37 @@ def test_get_llm_provider_returns_claude_when_api_key_present(monkeypatch) -> No
     assert isinstance(provider._chat_model, ChatAnthropic)
 
 
-def test_get_llm_provider_returns_ollama_when_no_api_key(monkeypatch) -> None:
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+def test_get_llm_provider_resolves_ollama_with_configured_base_url(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MODEL", "qwen3:8b")
+    monkeypatch.setenv("LLM_BASE_URL", "http://custom-ollama-host:11434")
 
     provider = get_llm_provider()
 
     assert isinstance(provider, LLMProvider)
     assert isinstance(provider._chat_model, ChatOllama)
+    assert provider._chat_model.base_url == "http://custom-ollama-host:11434"
+
+
+def test_get_llm_provider_raises_when_llm_provider_unset(monkeypatch) -> None:
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("LLM_MODEL", "claude-opus-5")
+
+    with pytest.raises(LLMProviderError):
+        get_llm_provider()
+
+
+def test_get_llm_provider_raises_when_llm_model_unset(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    with pytest.raises(LLMProviderError):
+        get_llm_provider()
+
+
+def test_get_llm_provider_raises_llm_provider_error_on_unknown_provider(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "not-a-real-provider")
+    monkeypatch.setenv("LLM_MODEL", "some-model")
+
+    with pytest.raises(LLMProviderError):
+        get_llm_provider()

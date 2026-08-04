@@ -20,9 +20,8 @@ import yaml
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from langchain_anthropic import ChatAnthropic
+from langchain.chat_models import init_chat_model
 from langchain_core.embeddings import Embeddings
-from langchain_ollama import ChatOllama
 from pydantic import ValidationError
 
 from vacancy_radar import documents
@@ -75,15 +74,25 @@ def get_vacancy_dir() -> Path:
 
 
 def get_llm_provider() -> LLMProvider:
-    """Which backend runs is inferred from configuration, not a separate selector
-    (llm/config.py) — Claude if an API key is set, Ollama otherwise. `LLMProvider` itself
-    doesn't special-case either — this is the only place that decides which `BaseChatModel`
-    it wraps."""
+    """The only place that decides which `BaseChatModel` `LLMProvider` wraps — `LLMConfig`
+    (llm/config.py) is just settings; resolving them into a live chat model is app wiring, not
+    config, so it lives here instead."""
     config = LLMConfig()
-    if config.anthropic_api_key:
-        chat_model = ChatAnthropic(model="claude-opus-5")
-    else:
-        chat_model = ChatOllama(model=config.ollama_model, base_url=config.ollama_host)
+    if not config.llm_provider or not config.llm_model:
+        raise LLMProviderError(
+            "LLM_PROVIDER and LLM_MODEL must both be set, e.g. LLM_PROVIDER=anthropic "
+            "LLM_MODEL=claude-opus-5 or LLM_PROVIDER=ollama LLM_MODEL=qwen3:8b — see the "
+            "README for the full list of supported providers."
+        )
+    try:
+        chat_model = init_chat_model(
+            config.llm_model, model_provider=config.llm_provider, base_url=config.llm_base_url
+        )
+    except (ValueError, ImportError) as exc:
+        raise LLMProviderError(
+            f"Couldn't initialize LLM_PROVIDER={config.llm_provider!r} "
+            f"LLM_MODEL={config.llm_model!r}: {exc}"
+        ) from exc
     return LLMProvider(chat_model)
 
 
@@ -164,8 +173,8 @@ def ui_analyze(
                 report = run_analysis(query_text, retriever, llm_provider)
             except (LLMProviderError, ValidationError, json.JSONDecodeError):
                 report_message = (
-                    "The analysis backend is unavailable right now. Check your ANTHROPIC_API_KEY "
-                    "or Ollama configuration and try again."
+                    "The analysis backend is unavailable right now. Check your LLM_PROVIDER/"
+                    "LLM_MODEL configuration and try again."
                 )
 
         return templates.TemplateResponse(

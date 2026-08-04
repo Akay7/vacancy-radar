@@ -1,37 +1,37 @@
 from vacancy_radar.llm.config import LLMConfig
 
 
-def test_no_api_key_leaves_anthropic_api_key_unset(monkeypatch) -> None:
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+def test_no_llm_provider_or_model_leaves_them_unset(monkeypatch) -> None:
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
 
     config = LLMConfig()
 
-    assert config.anthropic_api_key is None
+    assert config.llm_provider is None
+    assert config.llm_model is None
 
 
-def test_reads_anthropic_api_key_from_env(monkeypatch) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
-
-    config = LLMConfig()
-
-    assert config.anthropic_api_key == "sk-test-123"
-
-
-def test_ollama_defaults_when_no_overrides_given(monkeypatch) -> None:
-    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
-    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+def test_reads_llm_provider_and_model_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("LLM_MODEL", "claude-opus-5")
 
     config = LLMConfig()
 
-    assert config.ollama_model == "qwen3:8b"
-    assert config.ollama_host == "http://localhost:11434"
+    assert config.llm_provider == "anthropic"
+    assert config.llm_model == "claude-opus-5"
 
 
-def test_reads_ollama_overrides_from_env(monkeypatch) -> None:
-    monkeypatch.setenv("OLLAMA_MODEL", "llama3:70b")
-    monkeypatch.setenv("OLLAMA_HOST", "http://ollama:11434")
+def test_llm_base_url_unset_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
 
     config = LLMConfig()
 
-    assert config.ollama_model == "llama3:70b"
-    assert config.ollama_host == "http://ollama:11434"
+    assert config.llm_base_url is None
+
+
+def test_reads_llm_base_url_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_BASE_URL", "http://ollama:11434")
+
+    config = LLMConfig()
+
+    assert config.llm_base_url == "http://ollama:11434"

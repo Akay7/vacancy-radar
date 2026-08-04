@@ -9,13 +9,13 @@ Text prompts use `ChatPromptTemplate` (llm/prompts.py) inside that lambda; visio
 a `HumanMessage` directly, since there's no dynamic text to template — either way the resulting
 chain shape is identical, so all four paths compose and invoke the same way.
 
-`api.py`'s `get_llm_provider()` is the only place that decides *which* chat model to build —
-this class doesn't special-case a vendor anywhere: `.with_structured_output()`/`.with_retry()`/
-`.invoke()` are all `BaseChatModel`/`Runnable` interface, identical regardless of backend. The
-handful of vendor-specific exception types (`anthropic.APIError`, `httpx.HTTPError`) are caught
-together since only one of them can ever actually fire for a given wrapped chat model — listing
-both costs nothing and keeps this the one place backend failures are normalized to
-`LLMProviderError`.
+`get_llm_provider()` (api.py) is the only place that decides *which* chat model to build — this
+class doesn't special-case a vendor anywhere: `.with_structured_output()`/
+`.with_retry()`/`.invoke()` are all `BaseChatModel`/`Runnable` interface, identical regardless
+of backend. The handful of vendor-specific exception types (`anthropic.APIError`,
+`httpx.HTTPError`) are caught together since only one of them can ever actually fire for a
+given wrapped chat model — listing both costs nothing and keeps this the one place backend
+failures are normalized to `LLMProviderError`.
 """
 
 import base64

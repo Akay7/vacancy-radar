@@ -15,48 +15,45 @@ Every job search involves the same manual loop, repeated per vacancy: does this 
 ```mermaid
 flowchart LR
     subgraph SRC["Your data (git-tracked, private)"]
-        cv["CV bullets<br/>(markdown)"]
-        vac["vacancy folders<br/>(one per posting)"]
+        cv["CV bullets"]
+        vac["vacancy folders"]
     end
 
-    cli["ingest CLI<br/>ingest / sync / reindex"]
+    cli["ingest CLI"]
     cv --> cli
     vac --> cli
 
-    subgraph STORE["Chroma<br/>(embedded, regenerable cache)"]
+    subgraph STORE["Chroma (local cache)"]
         bullets[("experience_bullets")]
-        vacancies[("vacancies<br/>(+outcome)")]
+        vacancies[("vacancies<br/>+outcome")]
     end
     cli --> bullets
     cli --> vacancies
 
-    upload["Upload UI<br/>GET /ingest · POST /ingest/*"]
-    extract["documents.py<br/>pypdf · python-docx"]
-    upload --> extract --> llm
+    ui["Browser UI<br/>GET / · GET /ingest"]
+    upload["document upload<br/>(image/PDF/DOCX/text)"]
+    ui --> upload
+    upload -->|draft company/position/date| llm
     upload -->|confirmed: writes a new folder| vac
 
-    ui["Browser UI<br/>GET / · POST /analyze"]
     analyze["POST /api/analyze"]
     similar["POST /api/similar"]
     ui --> analyze
+    upload -->|uploaded via the Analyze screen:<br/>extracted text used as the JD| analyze
 
-    bullets --> analyze
-    vacancies --> analyze
+    bullets -->|top-k bullets| analyze
+    vacancies -->|ranked by similarity, as-is| analyze
     vacancies --> similar
 
-    llm["LLMProvider<br/>Claude API or Ollama"]
-    analyze -->|JD + bullets + similar vacancies + filter rules| llm
-    llm -->|grounded claims only| analyze
+    llm["LLMProvider<br/>LLM_PROVIDER/LLM_MODEL, any LangChain provider"]
+    analyze -->|JD + bullets + filter rules| llm
+    llm -->|proposed claims| grounding["grounding.enforce()<br/>quote must exist verbatim in a retrieved source"]
+    grounding -->|ungroundable claims silently dropped| analyze
 
-    report(["match report<br/>score · flags · gaps · draft paragraph"])
+    report(["match report<br/>score · flags · gaps · draft paragraph · similar vacancies"])
     dupe(["ranked similar vacancies<br/>(dedupe check)"])
     analyze --> report
     similar --> dupe
-
-    eval["eval/run_eval.py<br/>maintainer / CI only"]
-    eval -.-> bullets
-    eval -.-> vacancies
-    eval -.-> llm
 ```
 
 **Endpoints.** A persistent nav links the two pages below in both directions, so neither
@@ -77,7 +74,7 @@ requires already knowing its URL (specs/008-ingest-flow-clarity).
 | API | FastAPI | Async-capable, typed, widely requested in relevant job postings |
 | Vector DB | Chroma, embedded/persistent mode, via LangChain's `Chroma` vector store | No server to run — a few thousand vectors doesn't need one. Disposable, regenerable cache, never committed — see `specs/010-langchain-integration/research.md` |
 | Embeddings | `sentence-transformers` / `BAAI/bge-small-en-v1.5` (local), via LangChain's `HuggingFaceEmbeddings` | Zero cost, no key, reproducible |
-| Generation | LangChain `BaseChatModel` — `ChatAnthropic` (Claude) or `ChatOllama` (local) | Claude for quality; Ollama for a fully offline mode; provider-specific request/response handling is the maintained integration's job, not this repo's — see `specs/010-langchain-integration/research.md` |
+| Generation | LangChain `BaseChatModel`, resolved from `LLM_PROVIDER`/`LLM_MODEL` via `init_chat_model()` | Any provider LangChain supports works — Claude for quality, Ollama for a fully offline mode, or anything else — without this repo special-casing a vendor; provider-specific request/response handling is the maintained integration's job, not this repo's — see `specs/010-langchain-integration/research.md` |
 | UI | Server-rendered Jinja2 + htmx (vendored, no build step) | A one-page paste-and-submit form doesn't need a client-side framework or a second service — see `specs/005-minimal-ui/research.md` |
 | Document extraction | `pypdf` / `python-docx` for PDF/DOCX; images are read directly by the configured `LLMProvider`'s vision capability (no local OCR) | Reading a posting/offer document at upload time stays fully local, same as everything else — see `specs/006-vacancy-upload/research.md` and `specs/007-vision-drafting/research.md` |
 | Grounding | Citations required on every generated claim | A cover-letter draft that invents an achievement is worse than no draft |
@@ -91,16 +88,17 @@ vacancy-radar ingest   # once, to embed CV_DIR/VACANCY_DIR (defaults to data/exa
 vacancy-radar serve    # starts the web server on http://localhost:8000
 
 # full stack (any OCI engine — `podman compose` / `podman-compose` work the same)
-cp .env.example .env   # fill in ANTHROPIC_API_KEY, or leave it blank to use Ollama
+cp .env.example .env   # set LLM_PROVIDER=anthropic, LLM_MODEL=claude-opus-5, and ANTHROPIC_API_KEY
 docker compose up --build
 
 # fully offline (adds local Ollama)
+cp .env.example .env   # set LLM_PROVIDER=ollama, LLM_MODEL=qwen3:8b instead
 docker compose --profile local up --build
 ```
 
 Point `CV_DIR` / `VACANCY_DIR` in `.env` (or the environment, for the bare CLI) at your own git repo of career data. Nothing personal is baked into the image — see `data/example/` for the sanitized demo set used in this README and in CI. `data/user` is mounted read-write (the app writes a new vacancy folder there when you use the upload screen below); `data/example` stays read-only.
 
-There's no separate provider switch to set: `ANTHROPIC_API_KEY` present means Claude, blank means Ollama (`OLLAMA_MODEL`/`OLLAMA_HOST` both have working defaults).
+`LLM_PROVIDER`/`LLM_MODEL` are both required and pick the backend — `LLM_PROVIDER=anthropic LLM_MODEL=claude-opus-5` for the Claude API, `LLM_PROVIDER=ollama LLM_MODEL=qwen3:8b` for local/offline (`LLM_BASE_URL` only matters for that one), or any other provider LangChain supports, as long as its `langchain-<provider>` package is installed.
 
 The container stack is engine-neutral: image names are fully qualified (Podman has no implicit Docker Hub fallback) and bind mounts carry the `z` SELinux label, so `podman compose` on Fedora/RHEL needs no extra flags. `vacancy-radar serve` is also what the container image runs (with `--host 0.0.0.0` so the container is reachable through the port mapping) — no separate `uvicorn` invocation to remember either way. Run bare, it binds to `127.0.0.1` only, since there's no reason to expose it beyond your own machine (`--host`/`--port`/`--reload` are available for local dev). With the full stack running (or after `vacancy-radar serve` bare), open **http://localhost:8000** in a browser — paste a job posting and see your match report. Use **http://localhost:8000/ingest** to log a new vacancy by uploading its posting/offer document instead of hand-editing `vacancy.yaml`.
 
