@@ -4,7 +4,7 @@
 
 Runs entirely on your own machine, against your own data — clone it, point it at your CV, it's yours.
 
-**Status:** feature-complete for `v0.1.0` — ingestion, `/similar`, `/analyze`, the eval harness, and a minimal browser UI are all implemented. See [ROADMAP](#roadmap) below.
+**Status:** feature-complete for `v0.1.0` — ingestion, `/similar`, `/analyze`, the eval harness, a minimal browser UI, and vacancy upload (with vision-based drafting for images) are all implemented. See [ROADMAP](#roadmap) below.
 
 ## Why
 
@@ -87,6 +87,8 @@ flowchart LR
 ```bash
 # bare CLI
 pip install -e .
+vacancy-radar ingest   # once, to embed CV_DIR/VACANCY_DIR (defaults to data/example)
+vacancy-radar serve    # starts the web server on http://localhost:8000
 
 # full stack
 cp .env.example .env   # fill in ANTHROPIC_API_KEY or set LLM_PROVIDER=ollama
@@ -96,9 +98,9 @@ docker compose up --build
 docker compose --profile local up --build
 ```
 
-Point `CV_DIR` / `VACANCY_DIR` in `.env` at your own git repo of career data. Nothing personal is baked into the image — see `data/example/` for the sanitized demo set used in this README and in CI. `data/user` is mounted read-write (the app writes a new vacancy folder there when you use the upload screen below); `data/example` stays read-only.
+Point `CV_DIR` / `VACANCY_DIR` in `.env` (or the environment, for the bare CLI) at your own git repo of career data. Nothing personal is baked into the image — see `data/example/` for the sanitized demo set used in this README and in CI. `data/user` is mounted read-write (the app writes a new vacancy folder there when you use the upload screen below); `data/example` stays read-only.
 
-Then run `vacancy-radar ingest` once (bare) or exec it inside the running container, and open **http://localhost:8000** in a browser — paste a job posting and see your match report. Use **http://localhost:8000/ingest** to log a new vacancy by uploading its posting/offer document instead of hand-editing `vacancy.yaml`.
+`vacancy-radar serve` is also what the Docker image runs — no separate `uvicorn` invocation to remember either way (`--host`/`--port`/`--reload` are available for local dev). With the full stack running (or after `vacancy-radar serve` bare), open **http://localhost:8000** in a browser — paste a job posting and see your match report. Use **http://localhost:8000/ingest** to log a new vacancy by uploading its posting/offer document instead of hand-editing `vacancy.yaml`.
 
 ## Roadmap
 
@@ -107,6 +109,7 @@ Then run `vacancy-radar ingest` once (bare) or exec it inside the running contai
 - [x] `/analyze` full report generation
 - [x] Eval harness (grounding check, retrieval recall/MRR, similar-vacancy precision, filter-consistency)
 - [x] Minimal UI
+- [x] Vacancy upload UI (image/PDF/DOCX/text, vision-based drafting for images)
 - [x] `v0.1.0`
 
 ## License

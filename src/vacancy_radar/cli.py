@@ -1,4 +1,4 @@
-"""`vacancy-radar` CLI entry point: ingest, sync, reindex, import-fods."""
+"""`vacancy-radar` CLI entry point: ingest, sync, reindex, serve, import-fods."""
 
 import argparse
 import os
@@ -37,6 +37,11 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("sync", help="Upsert new/changed vacancy folders since last ingest")
     subparsers.add_parser("reindex", help="Delete the local cache and re-embed from source")
 
+    serve = subparsers.add_parser("serve", help="Run the web server (paste-a-posting + upload UI)")
+    serve.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
+    serve.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
+    serve.add_argument("--reload", action="store_true", help="Auto-reload on source changes")
+
     import_fods = subparsers.add_parser(
         "import-fods", help="One-time convert a Job.fods spreadsheet into vacancy folders"
     )
@@ -47,6 +52,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "import-fods":
         print("'import-fods' is not implemented yet — see README.md roadmap", file=sys.stderr)
         return 1
+
+    if args.command == "serve":
+        import uvicorn
+
+        uvicorn.run(
+            "vacancy_radar.api:app", host=args.host, port=args.port, reload=args.reload
+        )
+        return 0
 
     cv_dir, vacancy_dir = _dirs_from_env()
 

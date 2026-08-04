@@ -9,4 +9,4 @@ RUN pip install --no-cache-dir .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "vacancy_radar.api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["vacancy-radar", "serve"]
