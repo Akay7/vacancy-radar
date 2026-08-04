@@ -3,13 +3,13 @@ from pathlib import Path
 import pytest
 from _fakes import BagOfWordsEmbedder
 from fastapi.testclient import TestClient
+from langchain_anthropic import ChatAnthropic
+from langchain_ollama import ChatOllama
 
 from vacancy_radar import ingest
 from vacancy_radar.api import app, get_llm_provider, get_retriever
 from vacancy_radar.chroma_store import ChromaStore
 from vacancy_radar.llm.base import LLMProvider, LLMProviderError
-from vacancy_radar.llm.claude import ClaudeProvider
-from vacancy_radar.llm.ollama import OllamaProvider
 from vacancy_radar.models import (
     CandidateFlag,
     CandidateReport,
@@ -288,7 +288,8 @@ def test_get_llm_provider_returns_claude_when_api_key_present(monkeypatch) -> No
 
     provider = get_llm_provider()
 
-    assert isinstance(provider, ClaudeProvider)
+    assert isinstance(provider, LLMProvider)
+    assert isinstance(provider._chat_model, ChatAnthropic)
 
 
 def test_get_llm_provider_returns_ollama_when_no_api_key(monkeypatch) -> None:
@@ -296,4 +297,5 @@ def test_get_llm_provider_returns_ollama_when_no_api_key(monkeypatch) -> None:
 
     provider = get_llm_provider()
 
-    assert isinstance(provider, OllamaProvider)
+    assert isinstance(provider, LLMProvider)
+    assert isinstance(provider._chat_model, ChatOllama)

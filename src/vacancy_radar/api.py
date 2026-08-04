@@ -20,7 +20,9 @@ import yaml
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from langchain_anthropic import ChatAnthropic
 from langchain_core.embeddings import Embeddings
+from langchain_ollama import ChatOllama
 from pydantic import ValidationError
 
 from vacancy_radar import documents
@@ -30,9 +32,7 @@ from vacancy_radar.embedder import get_embeddings
 from vacancy_radar.filter_rules import load_filter_rules
 from vacancy_radar.grounding import enforce
 from vacancy_radar.llm.base import LLMProvider, LLMProviderError
-from vacancy_radar.llm.claude import ClaudeProvider
 from vacancy_radar.llm.config import LLMConfig
-from vacancy_radar.llm.ollama import OllamaProvider
 from vacancy_radar.models import DraftVacancyMetadata, Report, SimilarVacancy, VacancyRecord
 from vacancy_radar.retriever import Retriever
 
@@ -75,12 +75,16 @@ def get_vacancy_dir() -> Path:
 
 
 def get_llm_provider() -> LLMProvider:
-    """Which provider runs is inferred from configuration, not a separate selector
-    (llm/config.py) — Claude if an API key is set, Ollama otherwise."""
+    """Which backend runs is inferred from configuration, not a separate selector
+    (llm/config.py) — Claude if an API key is set, Ollama otherwise. `LLMProvider` itself
+    doesn't special-case either — this is the only place that decides which `BaseChatModel`
+    it wraps."""
     config = LLMConfig()
     if config.anthropic_api_key:
-        return ClaudeProvider()
-    return OllamaProvider(model=config.ollama_model, host=config.ollama_host)
+        chat_model = ChatAnthropic(model="claude-opus-5")
+    else:
+        chat_model = ChatOllama(model=config.ollama_model, base_url=config.ollama_host)
+    return LLMProvider(chat_model)
 
 
 @app.get("/healthz")

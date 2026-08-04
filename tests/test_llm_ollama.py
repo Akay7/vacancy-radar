@@ -4,9 +4,9 @@ from datetime import date
 import httpx
 import ollama
 import pytest
+from langchain_ollama import ChatOllama
 
-from vacancy_radar.llm.base import LLMProviderError
-from vacancy_radar.llm.ollama import OllamaProvider
+from vacancy_radar.llm.base import LLMProvider, LLMProviderError
 
 VALID_CANDIDATE = {
     "match_band": "good",
@@ -48,10 +48,10 @@ class _FakeOllamaClient:
         )
 
 
-def _provider_with_fake_client(fake_client: _FakeOllamaClient) -> OllamaProvider:
-    provider = OllamaProvider()
-    provider._chat_model._client = fake_client
-    return provider
+def _provider_with_fake_client(fake_client: _FakeOllamaClient) -> LLMProvider:
+    chat_model = ChatOllama(model="qwen3:8b")
+    chat_model._client = fake_client
+    return LLMProvider(chat_model)
 
 
 def test_analyze_parses_valid_json_on_first_try():

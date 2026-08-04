@@ -18,6 +18,7 @@ Bumps marked **[reindex]** change the embedding model or the vector-store schema
 - The Analyze screen (`GET /`) now also accepts uploading a document (image/PDF/DOCX/text, same formats as the Log-a-vacancy screen) instead of pasting text: company/position/date are drafted from the same upload and shown alongside the match report, so the vacancy can be logged right there — via the existing, unchanged `POST /ingest/confirm` — without a second visit or re-upload (specs/009-analyze-and-log-vacancy).
 - `vacancy-radar ingest`/`sync`/`reindex` output is now plain-language (which `CV_DIR`/`VACANCY_DIR` were scanned, grammatically correct counts) instead of a dense `key=value` line.
 - LLM generation and retrieval now run through LangChain (`ChatAnthropic`/`ChatOllama` for generation, `langchain-chroma`'s `Chroma` for retrieval) instead of hand-rolled per-vendor clients, per the amended constitution (Principle III) — no change to the grounded match-report/drafting behavior itself (verified at parity against the eval harness).
+- `ClaudeProvider`/`OllamaProvider` collapsed into one `LLMProvider(chat_model)` class, since both had converged to near-identical wrappers around `BaseChatModel`; every generation call (`/analyze`, vacancy-metadata drafting, vision text extraction) is now a chained LangChain `Runnable` (`ChatPromptTemplate`/`RunnableLambda` piped into the chat model) invoked the same way, instead of building a prompt string and calling a separate structured-output helper.
 
 ## [0.1.0] - 2026-08-04
 

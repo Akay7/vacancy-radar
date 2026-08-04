@@ -1,4 +1,6 @@
-"""Shared prompt text for /analyze — used by both ClaudeProvider and OllamaProvider.
+"""Shared prompt templates for /analyze and vacancy-metadata drafting — LangChain
+`ChatPromptTemplate`s piped directly into a chat model (`llm/base.py`'s chained `Runnable`
+style), used identically regardless of which chat model wraps them.
 
 One prompt, so both backends produce the same CandidateReport shape and are held to the same
 grounding rules (Constitution III) before grounding.py's shared validator checks their output
@@ -7,6 +9,8 @@ DraftVacancyMetadata Pydantic models directly to `with_structured_output()`
 (specs/010-langchain-integration) rather than a hand-written JSON Schema dict passed alongside
 the prompt.
 """
+
+from langchain_core.prompts import ChatPromptTemplate
 
 RUBRIC = """\
 Assess the match across four dimensions:
@@ -19,17 +23,7 @@ Based on all four, classify the overall match as exactly one of:
 "strong", "good", "weak", "poor"."""
 
 
-def build_analyze_prompt(
-    jd_text: str, bullets: list[tuple[str, str]], filter_rules_text: str
-) -> str:
-    bullets_block = (
-        "\n".join(f"[{source_id}] {text}" for source_id, text in bullets)
-        if bullets
-        else "(none ingested)"
-    )
-    filter_rules_block = filter_rules_text.strip() or "(none provided)"
-
-    return f"""\
+ANALYZE_PROMPT = ChatPromptTemplate.from_template("""\
 You are assessing how well a candidate's real experience matches a job posting, using ONLY
 the experience bullets and filter rules given below. Do not use any other knowledge about the
 candidate — you have none.
@@ -44,7 +38,7 @@ candidate — you have none.
 {filter_rules_block}
 
 # Rubric
-{RUBRIC}
+{rubric}
 
 # Output rules (critical — every claim must be independently verifiable)
 For every flag and every draft-paragraph sentence, you MUST include:
@@ -66,11 +60,30 @@ Respond with ONLY a JSON object matching this shape (no other text):
   ],
   "gaps": [str],
   "draft_sentences": [{{"text": str, "quote": str, "source_id": str}}]
-}}"""
+}}""")
 
 
-def build_draft_metadata_prompt(document_text: str) -> str:
-    return f"""\
+def analyze_prompt_input(
+    jd_text: str, bullets: list[tuple[str, str]], filter_rules_text: str
+) -> dict:
+    """Variables for ANALYZE_PROMPT.invoke() — block formatting stays plain Python (conditional
+    fallback text isn't something template substitution does); the template itself owns the
+    actual prompt assembly."""
+    bullets_block = (
+        "\n".join(f"[{source_id}] {text}" for source_id, text in bullets)
+        if bullets
+        else "(none ingested)"
+    )
+    filter_rules_block = filter_rules_text.strip() or "(none provided)"
+    return {
+        "jd_text": jd_text,
+        "bullets_block": bullets_block,
+        "filter_rules_block": filter_rules_block,
+        "rubric": RUBRIC,
+    }
+
+
+DRAFT_METADATA_PROMPT = ChatPromptTemplate.from_template("""\
 You are reading an uploaded job posting or offer document to help someone log it as a vacancy
 record. Extract only what the document actually states — do not invent a company, position, or
 date that isn't there.
@@ -93,12 +106,18 @@ Respond with ONLY a JSON object matching this shape (no other text):
   "company": str,
   "position": str,
   "date": str
-}}"""
+}}""")
+
+
+def draft_metadata_prompt_input(document_text: str) -> dict:
+    return {"document_text": document_text}
 
 
 def build_draft_metadata_vision_prompt() -> str:
     """Prompt for image uploads (specs/007-vision-drafting) — no OCR'd text is available;
-    the model reads the attached image directly instead of any extracted text."""
+    the model reads the attached image directly instead of any extracted text. No variables to
+    fill, so this stays a plain string (fed into a `HumanMessage` by `llm/base.py`'s
+    `RunnableLambda` stage) rather than a `ChatPromptTemplate`."""
     return """\
 You are looking at an uploaded photo or screenshot of a job posting or offer, to help someone
 log it as a vacancy record. Extract only what the image actually shows — do not invent a

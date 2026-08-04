@@ -6,9 +6,9 @@ import anthropic
 import httpx
 import pytest
 from anthropic.types import Message, TextBlock, Usage
+from langchain_anthropic import ChatAnthropic
 
-from vacancy_radar.llm.base import LLMProviderError
-from vacancy_radar.llm.claude import ClaudeProvider
+from vacancy_radar.llm.base import LLMProvider, LLMProviderError
 
 
 def _fake_message(text: str) -> Message:
@@ -46,13 +46,13 @@ class _FakeClient:
         self.messages = _FakeMessages(response=response, error=error)
 
 
-def _provider_with_fake_client(fake_client: _FakeClient) -> ClaudeProvider:
-    """ClaudeProvider constructs a real ChatAnthropic; its `_client` attribute (a real
-    anthropic.Anthropic instance) is swapped for the fake post-construction — there's no
-    client= constructor injection point on ChatAnthropic itself (verified)."""
-    provider = ClaudeProvider()
-    provider._chat_model._client = fake_client
-    return provider
+def _provider_with_fake_client(fake_client: _FakeClient) -> LLMProvider:
+    """A real ChatAnthropic's `_client` attribute (a real anthropic.Anthropic instance) is
+    swapped for the fake post-construction — there's no client= constructor injection point on
+    ChatAnthropic itself (verified)."""
+    chat_model = ChatAnthropic(model="claude-opus-5")
+    chat_model._client = fake_client
+    return LLMProvider(chat_model)
 
 
 VALID_CANDIDATE_JSON = json.dumps(
