@@ -4,7 +4,7 @@
 
 Runs entirely on your own machine, against your own data — clone it, point it at your CV, it's yours.
 
-**Status:** feature-complete for `v0.1.0` — ingestion, `/similar`, `/analyze`, the eval harness, a minimal browser UI, and vacancy upload (with vision-based drafting for images) are all implemented. See [ROADMAP](#roadmap) below.
+**Status:** feature-complete for `v0.1.0` — ingestion, `/api/similar`, `/api/analyze`, the eval harness, a minimal browser UI, and vacancy upload (with vision-based drafting for images) are all implemented. See [ROADMAP](#roadmap) below.
 
 ## Why
 
@@ -30,14 +30,14 @@ flowchart LR
     cli --> bullets
     cli --> vacancies
 
-    upload["Upload UI<br/>GET /ingest · POST /ui/ingest/*"]
+    upload["Upload UI<br/>GET /ingest · POST /ingest/*"]
     extract["documents.py<br/>pypdf · python-docx"]
     upload --> extract --> llm
     upload -->|confirmed: writes a new folder| vac
 
-    ui["Browser UI<br/>GET / · POST /ui/analyze"]
-    analyze["POST /analyze"]
-    similar["POST /similar"]
+    ui["Browser UI<br/>GET / · POST /analyze"]
+    analyze["POST /api/analyze"]
+    similar["POST /api/similar"]
     ui --> analyze
 
     bullets --> analyze
@@ -59,13 +59,13 @@ flowchart LR
     eval -.-> llm
 ```
 
-**Endpoints**
-- `GET /` — paste-a-posting UI. Server-rendered (Jinja2 + htmx, no build step) — submits to `POST /ui/analyze` and swaps the rendered report in place.
-- `POST /analyze` — paste JD text. Retrieves matching experience bullets + similar past vacancies with outcomes, returns a structured match report with a draft opening paragraph grounded only in retrieved bullets (citations back to source).
-- `POST /ui/analyze` — the HTML counterpart to `POST /analyze`, used by the UI above; same grounded analysis, rendered instead of returned as JSON.
-- `POST /similar` — dedupe + memory: "you saw almost this vacancy before — applied, rejected for X."
-- `GET /ingest` — log-a-vacancy UI. Upload a posting/offer document (image, PDF, DOCX, or plain text); company/position/date are drafted from it for you to review and edit, outcome is always typed by hand, then it's saved and immediately searchable.
-- `POST /ui/ingest/draft` / `POST /ui/ingest/confirm` — the two-step upload flow behind the screen above (draft, then review-and-save).
+**Endpoints.** A persistent nav links the two pages below in both directions, so neither
+requires already knowing its URL (specs/008-ingest-flow-clarity).
+- `GET /` — paste-a-posting UI. Server-rendered (Jinja2 + htmx, no build step) — submits to `POST /analyze` and swaps the rendered report in place. Also accepts uploading a document (image/PDF/DOCX/text, same formats as `/ingest`) instead of pasting text: company/position/date are drafted from it alongside the match report, so the vacancy can be logged right there without a second visit to `/ingest` (specs/009-analyze-and-log-vacancy).
+- `GET /ingest` — log-a-vacancy UI. Upload a posting/offer document (image, PDF, DOCX, or plain text); company/position/date are drafted from it for you to review and edit, outcome is always typed by hand, then it's saved and immediately searchable. Each step (upload/review/error/done) is visually distinguished.
+- `POST /ingest/draft` / `POST /ingest/confirm` — the two-step upload flow behind the screen above (draft, then review-and-save).
+- `POST /api/analyze` — paste JD text. Retrieves matching experience bullets + similar past vacancies with outcomes, returns a structured match report with a draft opening paragraph grounded only in retrieved bullets (citations back to source).
+- `POST /api/similar` — dedupe + memory: "you saw almost this vacancy before — applied, rejected for X."
 - `GET /healthz` — liveness check.
 
 **Data model.** Each vacancy is a folder (`data/user/vacancies/YYYY-MM-DD_company-slug_position-slug/`), not a flat record — source-of-truth `vacancy.yaml`, plus the actual artifacts of the application (posting snapshots, correspondence, generated analysis). Full schema and reasoning: see the project plan (private, linked from the maintainer's own notes — not included in this public repo).
@@ -100,17 +100,21 @@ docker compose --profile local up --build
 
 Point `CV_DIR` / `VACANCY_DIR` in `.env` (or the environment, for the bare CLI) at your own git repo of career data. Nothing personal is baked into the image — see `data/example/` for the sanitized demo set used in this README and in CI. `data/user` is mounted read-write (the app writes a new vacancy folder there when you use the upload screen below); `data/example` stays read-only.
 
-`vacancy-radar serve` is also what the Docker image runs — no separate `uvicorn` invocation to remember either way (`--host`/`--port`/`--reload` are available for local dev). With the full stack running (or after `vacancy-radar serve` bare), open **http://localhost:8000** in a browser — paste a job posting and see your match report. Use **http://localhost:8000/ingest** to log a new vacancy by uploading its posting/offer document instead of hand-editing `vacancy.yaml`.
+The server validates required configuration for your configured `LLM_PROVIDER` at startup — e.g. it refuses to start with a specific message if `LLM_PROVIDER=claude` (the default) and `ANTHROPIC_API_KEY` isn't set, rather than starting normally and failing on the first request.
+
+`vacancy-radar serve` is also what the Docker image runs (with `--host 0.0.0.0` so the container is reachable through the port mapping) — no separate `uvicorn` invocation to remember either way. Run bare, it binds to `127.0.0.1` only, since there's no reason to expose it beyond your own machine (`--host`/`--port`/`--reload` are available for local dev). With the full stack running (or after `vacancy-radar serve` bare), open **http://localhost:8000** in a browser — paste a job posting and see your match report. Use **http://localhost:8000/ingest** to log a new vacancy by uploading its posting/offer document instead of hand-editing `vacancy.yaml`.
 
 ## Roadmap
 
 - [x] Ingestion CLI (experience bullets + vacancy folders → Chroma, upsert-keyed by natural key)
-- [x] `/similar` retrieval
-- [x] `/analyze` full report generation
+- [x] `/api/similar` retrieval
+- [x] `/api/analyze` full report generation
 - [x] Eval harness (grounding check, retrieval recall/MRR, similar-vacancy precision, filter-consistency)
 - [x] Minimal UI
 - [x] Vacancy upload UI (image/PDF/DOCX/text, vision-based drafting for images)
 - [x] `v0.1.0`
+- [x] Clear ingest navigation & shared visual style (specs/008-ingest-flow-clarity)
+- [x] Analyze and log a vacancy in one pass, from an uploaded document (specs/009-analyze-and-log-vacancy)
 
 ## License
 

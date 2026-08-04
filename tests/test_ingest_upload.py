@@ -38,6 +38,9 @@ class FakeDraftLLMProvider(LLMProvider):
             raise self.error
         return self.draft_factory(document_text)
 
+    def extract_document_text(self, image_bytes: bytes, image_media_type: str) -> str:
+        raise NotImplementedError("not exercised by this test file's fakes")
+
 
 def _default_draft(document_text: str) -> DraftVacancyMetadata:
     return DraftVacancyMetadata(company="Acme Corp", position="Backend Engineer", date="2026-01-15")
@@ -80,11 +83,22 @@ def test_ingest_page_renders_upload_form(isolated_vacancy_dir) -> None:
     assert "multipart/form-data" in response.text
 
 
+def test_ingest_page_has_nav_link_back_to_analyze(isolated_vacancy_dir) -> None:
+    response = client.get("/ingest")
+    assert '<nav class="site-nav">' in response.text
+    assert '<a href="/"' in response.text
+
+
+def test_ingest_page_shows_upload_step(isolated_vacancy_dir) -> None:
+    response = client.get("/ingest")
+    assert 'data-step="upload"' in response.text
+
+
 def test_ingest_draft_renders_prefilled_fields(
     isolated_vacancy_dir, isolated_llm_provider
 ) -> None:
     response = client.post(
-        "/ui/ingest/draft",
+        "/ingest/draft",
         files={
             "file": (
                 "posting.txt",
@@ -99,10 +113,35 @@ def test_ingest_draft_renders_prefilled_fields(
     assert "upload_token" in response.text
 
 
+def test_ingest_draft_success_shows_review_step(
+    isolated_vacancy_dir, isolated_llm_provider
+) -> None:
+    response = client.post(
+        "/ingest/draft",
+        files={"file": ("posting.txt", io.BytesIO(b"Acme Corp posting"), "text/plain")},
+    )
+    assert 'data-step="review"' in response.text
+
+
+def test_ingest_draft_failure_shows_error_step(isolated_vacancy_dir) -> None:
+    from vacancy_radar.llm.base import LLMProviderError
+
+    app.dependency_overrides[get_llm_provider] = lambda: FakeDraftLLMProvider(
+        error=LLMProviderError("backend unreachable")
+    )
+
+    response = client.post(
+        "/ingest/draft",
+        files={"file": ("posting.txt", io.BytesIO(b"Acme Corp posting"), "text/plain")},
+    )
+    assert 'data-step="error"' in response.text
+    assert 'class="error"' in response.text
+
+
 def _draft_upload(filename: str = "posting.txt", content: bytes = b"Acme Corp posting") -> str:
     """POST /ui/ingest/draft and return the upload_token from the rendered review form."""
     response = client.post(
-        "/ui/ingest/draft",
+        "/ingest/draft",
         files={"file": (filename, io.BytesIO(content), "text/plain")},
     )
     match = re.search(r'name="upload_token" value="([^"]+)"', response.text)
@@ -117,7 +156,7 @@ def test_confirm_writes_edited_values_not_the_original_draft(isolated_vacancy_di
     token = _draft_upload()
 
     response = client.post(
-        "/ui/ingest/confirm",
+        "/ingest/confirm",
         data={
             "upload_token": token,
             "original_filename": "posting.txt",
@@ -135,13 +174,14 @@ def test_confirm_writes_edited_values_not_the_original_draft(isolated_vacancy_di
     assert record["company"] == "Edited Corp"
     assert record["outcome"] == "applied"
     assert (folder / "sources" / "posting.txt").exists()
+    assert 'data-step="done"' in response.text
 
 
 def test_confirm_rejects_missing_outcome(isolated_vacancy_dir) -> None:
     token = _draft_upload()
 
     response = client.post(
-        "/ui/ingest/confirm",
+        "/ingest/confirm",
         data={
             "upload_token": token,
             "original_filename": "posting.txt",
@@ -153,6 +193,8 @@ def test_confirm_rejects_missing_outcome(isolated_vacancy_dir) -> None:
     )
     assert response.status_code == 200
     assert list(isolated_vacancy_dir.iterdir()) == []
+    assert 'data-step="error"' in response.text
+    assert 'class="error"' in response.text
 
 
 def test_never_confirming_creates_no_vacancy_folder(isolated_vacancy_dir) -> None:
@@ -175,7 +217,7 @@ def _confirm(token: str, **overrides):
         "outcome": "applied",
     }
     data.update(overrides)
-    return client.post("/ui/ingest/confirm", data=data)
+    return client.post("/ingest/confirm", data=data)
 
 
 def test_confirmed_vacancy_is_immediately_searchable_via_similar(isolated_vacancy_dir) -> None:
@@ -184,7 +226,7 @@ def test_confirmed_vacancy_is_immediately_searchable_via_similar(isolated_vacanc
     assert confirm_response.status_code == 200
     assert "searchable" in confirm_response.text.lower()
 
-    response = client.post("/similar", params={"jd_text": POSTING_TEXT})
+    response = client.post("/api/similar", params={"jd_text": POSTING_TEXT})
     assert response.status_code == 200
     body = response.json()
     assert any(v["vacancy_id"] == "2026-01-15_acme-corp_backend-engineer" for v in body)
@@ -204,7 +246,7 @@ def test_draft_image_upload_never_calls_extract_text_and_passes_image_bytes(
     )
 
     response = client.post(
-        "/ui/ingest/draft",
+        "/ingest/draft",
         files={"file": ("posting.png", io.BytesIO(b"fake-png-bytes"), "image/png")},
     )
 
@@ -226,7 +268,7 @@ def test_draft_image_upload_shows_specific_message_when_vision_fails(
     )
 
     response = client.post(
-        "/ui/ingest/draft",
+        "/ingest/draft",
         files={"file": ("posting.png", io.BytesIO(b"fake-png-bytes"), "image/png")},
     )
 
@@ -246,7 +288,7 @@ def test_draft_non_image_upload_shows_generic_message_when_llm_fails(
     )
 
     response = client.post(
-        "/ui/ingest/draft",
+        "/ingest/draft",
         files={"file": ("posting.txt", io.BytesIO(b"Acme Corp posting"), "text/plain")},
     )
 

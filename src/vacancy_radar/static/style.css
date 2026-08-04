@@ -1,0 +1,104 @@
+/* Shared across every page (specs/008-ingest-flow-clarity) — replaces the inline <style>
+   blocks that used to be duplicated in index.html and ingest.html. */
+
+body {
+  font-family: system-ui, sans-serif;
+  max-width: 760px;
+  margin: 2rem auto;
+  padding: 0 1rem;
+  color: #1a1a1a;
+}
+
+h1 {
+  margin-top: 0;
+}
+
+textarea {
+  width: 100%;
+  min-height: 220px;
+  font-family: inherit;
+  font-size: 1rem;
+  padding: 0.6rem;
+  box-sizing: border-box;
+}
+
+input[type="file"] {
+  display: block;
+  margin: 0.6rem 0;
+}
+
+label {
+  display: block;
+  margin-top: 0.8rem;
+  font-weight: 600;
+}
+
+input[type="text"],
+input[type="date"] {
+  width: 100%;
+  font-size: 1rem;
+  padding: 0.4rem;
+  box-sizing: border-box;
+}
+
+button {
+  font-size: 1rem;
+  padding: 0.5rem 1.2rem;
+  margin-top: 0.5rem;
+  border: 1px solid #1a1a1a;
+  border-radius: 4px;
+  background: #1a1a1a;
+  color: #fff;
+  cursor: pointer;
+}
+
+button:hover {
+  opacity: 0.85;
+}
+
+#spinner,
+#ingest-spinner {
+  display: none;
+  margin-left: 0.6rem;
+}
+
+#spinner.htmx-request,
+#ingest-spinner.htmx-request {
+  display: inline;
+}
+
+/* Persistent nav (FR-001/FR-002) — two links, wraps rather than disappearing at narrow
+   widths (FR-008), no collapsing/hamburger behavior needed for just two items. */
+.site-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  margin-bottom: 1.5rem;
+  border-bottom: 1px solid #ddd;
+}
+
+.site-nav a {
+  color: #1a1a1a;
+  text-decoration: none;
+  font-weight: 600;
+  padding-bottom: 0.25rem;
+  border-bottom: 2px solid transparent;
+}
+
+.site-nav a.active {
+  border-bottom-color: #1a1a1a;
+}
+
+.site-nav a:hover {
+  text-decoration: underline;
+}
+
+/* Step/error/success states (FR-003/FR-004/FR-005) */
+.error {
+  color: #b4530a;
+}
+
+.success {
+  color: #1a7a3a;
+}

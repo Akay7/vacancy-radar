@@ -169,3 +169,34 @@ def test_draft_vacancy_metadata_raises_llm_provider_error_on_vision_failure_no_f
 
     # exactly one attempt was made — no second/fallback request
     assert fake_client.messages.call_count == 1
+
+
+# --- Vision-based text extraction for image analysis (specs/009-analyze-and-log-vacancy) --
+
+
+def test_extract_document_text_sends_vision_content_block_and_returns_plain_text():
+    fake_client = _FakeClient(
+        response=_FakeResponse([_TextBlock("Backend Engineer role at Acme Corp...")])
+    )
+    provider = ClaudeProvider(client=fake_client)
+
+    result = provider.extract_document_text(b"fake-png-bytes", "image/png")
+
+    kwargs = fake_client.messages.last_kwargs
+    content = kwargs["messages"][0]["content"]
+    image_block = next(block for block in content if block["type"] == "image")
+    assert image_block["source"]["type"] == "base64"
+    assert image_block["source"]["media_type"] == "image/png"
+    text_block = next(block for block in content if block["type"] == "text")
+    assert isinstance(text_block["text"], str) and text_block["text"]
+    assert "output_config" not in kwargs  # plain text response, not schema-constrained
+    assert result == "Backend Engineer role at Acme Corp..."
+
+
+def test_extract_document_text_raises_llm_provider_error_on_failure():
+    error = anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com"))
+    fake_client = _FakeClient(error=error)
+    provider = ClaudeProvider(client=fake_client)
+
+    with pytest.raises(LLMProviderError):
+        provider.extract_document_text(b"fake-png-bytes", "image/png")

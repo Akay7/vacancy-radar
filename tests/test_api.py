@@ -40,6 +40,9 @@ class FakeLLMProvider(LLMProvider):
     ) -> DraftVacancyMetadata:
         raise NotImplementedError("not exercised by this test file's fakes")
 
+    def extract_document_text(self, image_bytes: bytes, image_media_type: str) -> str:
+        raise NotImplementedError("not exercised by this test file's fakes")
+
 
 def _empty_candidate(jd_text, bullets, filter_rules) -> CandidateReport:
     return CandidateReport(match_band="poor", flags=[], gaps=[], draft_sentences=[])
@@ -74,7 +77,7 @@ def test_similar_returns_ranked_matches(isolated_retriever) -> None:
     store, embedder = isolated_retriever
     ingest.ingest_vacancies(VACANCIES_DIR, store=store, embedder=embedder)
 
-    response = client.post("/similar", params={"jd_text": ACME_POSTING})
+    response = client.post("/api/similar", params={"jd_text": ACME_POSTING})
     assert response.status_code == 200
     body = response.json()
     assert body[0]["vacancy_id"] == "2026-01-15_acme-corp_backend-engineer"
@@ -88,18 +91,18 @@ def test_similar_flags_duplicate_application(isolated_retriever) -> None:
     store, embedder = isolated_retriever
     ingest.ingest_vacancies(VACANCIES_DIR, store=store, embedder=embedder)
 
-    response = client.post("/similar", params={"jd_text": ACME_POSTING})
+    response = client.post("/api/similar", params={"jd_text": ACME_POSTING})
     assert response.json()[0]["is_duplicate"] is True
 
 
 def test_similar_empty_index_returns_empty_list(isolated_retriever) -> None:
-    response = client.post("/similar", params={"jd_text": "any job description text"})
+    response = client.post("/api/similar", params={"jd_text": "any job description text"})
     assert response.status_code == 200
     assert response.json() == []
 
 
 def test_similar_rejects_empty_jd_text(isolated_retriever) -> None:
-    response = client.post("/similar", params={"jd_text": "   "})
+    response = client.post("/api/similar", params={"jd_text": "   "})
     assert response.status_code == 422
 
 
@@ -137,7 +140,7 @@ def test_analyze_returns_grounded_flags_and_gaps(isolated_retriever, isolated_ll
 
     isolated_llm_provider.candidate_factory = factory
 
-    response = client.post("/analyze", params={"jd_text": ACME_POSTING})
+    response = client.post("/api/analyze", params={"jd_text": ACME_POSTING})
     assert response.status_code == 200
     body = response.json()
     assert body["score"] == "good"
@@ -174,7 +177,7 @@ def test_analyze_draft_paragraph_contains_only_grounded_claims(
 
     isolated_llm_provider.candidate_factory = factory
 
-    response = client.post("/analyze", params={"jd_text": ACME_POSTING})
+    response = client.post("/api/analyze", params={"jd_text": ACME_POSTING})
     body = response.json()
     assert body["draft_paragraph"] == "I have hands-on backend experience."
     assert len(body["citations"]) == 1
@@ -204,7 +207,7 @@ def test_analyze_empty_index_returns_empty_report_not_error(
 
     isolated_llm_provider.candidate_factory = factory
 
-    response = client.post("/analyze", params={"jd_text": "any job description text"})
+    response = client.post("/api/analyze", params={"jd_text": "any job description text"})
     assert response.status_code == 200
     body = response.json()
     assert body["flags"] == []
@@ -214,7 +217,7 @@ def test_analyze_empty_index_returns_empty_report_not_error(
 
 
 def test_analyze_rejects_empty_jd_text(isolated_retriever, isolated_llm_provider) -> None:
-    response = client.post("/analyze", params={"jd_text": "   "})
+    response = client.post("/api/analyze", params={"jd_text": "   "})
     assert response.status_code == 422
 
 
@@ -224,7 +227,7 @@ def test_analyze_returns_502_on_llm_provider_error(isolated_retriever) -> None:
 
     app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(raising_factory)
 
-    response = client.post("/analyze", params={"jd_text": "some JD text"})
+    response = client.post("/api/analyze", params={"jd_text": "some JD text"})
     assert response.status_code == 502
 
 
@@ -251,7 +254,7 @@ def test_analyze_draft_sentences_matches_draft_paragraph(
 
     isolated_llm_provider.candidate_factory = factory
 
-    response = client.post("/analyze", params={"jd_text": ACME_POSTING})
+    response = client.post("/api/analyze", params={"jd_text": ACME_POSTING})
     body = response.json()
     assert body["draft_sentences"] == [
         {
@@ -268,8 +271,41 @@ def test_analyze_similar_field_matches_direct_similar_call(
     store, embedder = isolated_retriever
     ingest.ingest_vacancies(VACANCIES_DIR, store=store, embedder=embedder)
 
-    similar_response = client.post("/similar", params={"jd_text": ACME_POSTING})
-    analyze_response = client.post("/analyze", params={"jd_text": ACME_POSTING})
+    similar_response = client.post("/api/similar", params={"jd_text": ACME_POSTING})
+    analyze_response = client.post("/api/analyze", params={"jd_text": ACME_POSTING})
 
     assert analyze_response.status_code == 200
     assert analyze_response.json()["similar"] == similar_response.json()
+
+
+# --- specs/009-analyze-and-log-vacancy: startup LLM configuration validation --------------
+#
+# These are the only tests in the suite that use `with TestClient(app) as client:` (a context
+# manager) — FastAPI only runs `lifespan` for that form, so every other test file's
+# module-level `client = TestClient(app)` never triggers validate_llm_provider_config() and
+# needs no fake ANTHROPIC_API_KEY.
+
+
+def test_startup_fails_when_claude_configured_without_api_key(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        with TestClient(app):
+            pass
+
+
+def test_startup_succeeds_when_ollama_configured_without_api_key(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    with TestClient(app):
+        pass  # no exception — Ollama has no required secret
+
+
+def test_startup_fails_on_invalid_llm_provider_value(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "openai")  # not a supported provider
+
+    with pytest.raises(RuntimeError, match="Invalid LLM configuration"):
+        with TestClient(app):
+            pass

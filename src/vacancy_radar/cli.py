@@ -15,18 +15,35 @@ def _dirs_from_env() -> tuple[Path, Path]:
     return cv_dir, vacancy_dir
 
 
-def _print_summary(command: str, summary: RunSummary) -> None:
-    print(
-        f"{command}: bullets_ingested={summary.bullets_ingested} "
-        f"vacancies_created={summary.vacancies_created} "
-        f"vacancies_updated={summary.vacancies_updated} "
-        f"vacancies_skipped={summary.vacancies_skipped}"
-    )
+_COMMAND_VERBS = {"ingest": "Ingesting", "sync": "Syncing", "reindex": "Reindexing"}
+
+
+def _plural(count: int, singular: str, plural: str) -> str:
+    return f"{count} {singular if count == 1 else plural}"
+
+
+def _print_summary(
+    command: str, cv_dir: Path, vacancy_dir: Path, summary: RunSummary
+) -> None:
+    verb = _COMMAND_VERBS.get(command, command.capitalize())
+    print(f"{verb} from:")
+    print(f"  CV_DIR:      {cv_dir}")
+    print(f"  VACANCY_DIR: {vacancy_dir}")
+    print()
+    print(f"Ingested {_plural(summary.bullets_ingested, 'CV bullet', 'CV bullets')}")
+    print(f"Created {_plural(summary.vacancies_created, 'new vacancy', 'new vacancies')}")
+    print(f"Updated {_plural(summary.vacancies_updated, 'vacancy', 'vacancies')}")
+    skipped = _plural(summary.vacancies_skipped, "unchanged vacancy", "unchanged vacancies")
+    print(f"Skipped {skipped}")
+
     for invalid in summary.vacancies_invalid:
-        print(f"  INVALID: {invalid.folder} — {invalid.reason}", file=sys.stderr)
+        print(f"  Invalid folder: {invalid.folder} — {invalid.reason}", file=sys.stderr)
     for conflict in summary.vacancies_conflicting:
         folders = ", ".join(conflict.folders)
-        print(f"  CONFLICT: natural key '{conflict.natural_key}' — {folders}", file=sys.stderr)
+        print(
+            f"  Conflict: natural key '{conflict.natural_key}' shared by: {folders}",
+            file=sys.stderr,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -38,7 +55,12 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("reindex", help="Delete the local cache and re-embed from source")
 
     serve = subparsers.add_parser("serve", help="Run the web server (paste-a-posting + upload UI)")
-    serve.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
+    serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Binds to localhost only by default; pass --host 0.0.0.0 to accept "
+        "connections from other hosts (e.g. via Docker port mapping)",
+    )
     serve.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
     serve.add_argument("--reload", action="store_true", help="Auto-reload on source changes")
 
@@ -79,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         summary = ingest.reindex(cv_dir, vacancy_dir)
 
-    _print_summary(args.command, summary)
+    _print_summary(args.command, cv_dir, vacancy_dir, summary)
     return 0
 
 

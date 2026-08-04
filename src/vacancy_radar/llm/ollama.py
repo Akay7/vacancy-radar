@@ -19,6 +19,7 @@ from vacancy_radar.llm.prompts import (
     build_analyze_prompt,
     build_draft_metadata_prompt,
     build_draft_metadata_vision_prompt,
+    build_extract_document_text_vision_prompt,
 )
 from vacancy_radar.models import CandidateReport, DraftVacancyMetadata
 
@@ -33,21 +34,15 @@ class OllamaProvider(LLMProvider):
         self.model = model
         self.host = host
 
-    def _chat(self, prompt: str, images: list[str] | None = None) -> str:
+    def _chat(self, prompt: str, images: list[str] | None = None, json_format: bool = True) -> str:
         message: dict = {"role": "user", "content": prompt}
         if images:
             message["images"] = images
+        body = {"model": self.model, "messages": [message], "stream": False}
+        if json_format:
+            body["format"] = "json"
         try:
-            response = httpx.post(
-                f"{self.host}/api/chat",
-                json={
-                    "model": self.model,
-                    "messages": [message],
-                    "stream": False,
-                    "format": "json",
-                },
-                timeout=120.0,
-            )
+            response = httpx.post(f"{self.host}/api/chat", json=body, timeout=120.0)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise LLMProviderError(f"Ollama unreachable/misconfigured: {exc}") from exc
@@ -118,3 +113,11 @@ class OllamaProvider(LLMProvider):
             return DraftVacancyMetadata.model_validate(data)
         except (json.JSONDecodeError, ValidationError) as exc:
             raise LLMProviderError(f"Ollama vision response was not usable: {exc}") from exc
+
+    def extract_document_text(self, image_bytes: bytes, image_media_type: str) -> str:
+        """Vision-based text extraction for image analysis (specs/009-analyze-and-log-vacancy)
+        — plain text out; `_chat()`'s JSON-format constraint is disabled since this isn't
+        validated against a schema like the other vision methods."""
+        prompt = build_extract_document_text_vision_prompt()
+        image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        return self._chat(prompt, images=[image_b64], json_format=False)

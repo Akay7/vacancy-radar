@@ -167,3 +167,15 @@ Respond with ONLY a JSON object matching this shape (no other text):
   "position": str,
   "date": str
 }"""
+
+
+def build_extract_document_text_vision_prompt() -> str:
+    """Prompt for the vision-based text extraction used only to drive retrieval for image
+    uploads on the Analyze screen (specs/009-analyze-and-log-vacancy) — plain text out, no JSON
+    wrapper, since this isn't validated against a schema like the other vision prompts."""
+    return """\
+You are looking at an uploaded photo or screenshot of a job posting. Transcribe its meaningful
+content as plain text — the role, responsibilities, requirements, and any other substantive
+details shown — so it can be used to search for relevant experience elsewhere. Do not add
+commentary, headers, or formatting; just the posting's own content, as plain text. If the image
+doesn't show a legible job posting, say so plainly in one short sentence instead of guessing."""

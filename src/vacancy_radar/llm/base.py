@@ -49,3 +49,22 @@ class LLMProvider(ABC):
         to a text-based attempt — there is no OCR text to fall back to.
         """
         raise NotImplementedError
+
+    @abstractmethod
+    def extract_document_text(self, image_bytes: bytes, image_media_type: str) -> str:
+        """Transcribe/summarize an image's job-posting content as plain text.
+
+        Used only to give the existing text-based retrieval (`retriever.query_bullets()` /
+        `query_similar_vacancies()`) something to embed for image uploads on the Analyze screen
+        (specs/009-analyze-and-log-vacancy) — there is no other source of text for an image, and
+        retrieval fundamentally needs text. Not JSON-structured like `analyze()`/
+        `draft_vacancy_metadata()` — just a plain string, with no fixed shape to validate.
+
+        This is the LLM's own vision capability reading the image directly, the same category of
+        thing `draft_vacancy_metadata()`'s image path already does — not local OCR, and not a
+        reintroduction of what specs/007-vision-drafting removed. The implementation MUST attempt
+        vision directly (no capability-detection call) and raise `LLMProviderError` on any
+        failure (no vision support, backend error, empty/unusable response) — there is no
+        fallback, exactly like the other vision-path methods.
+        """
+        raise NotImplementedError

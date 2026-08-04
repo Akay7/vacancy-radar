@@ -1,8 +1,9 @@
+<div data-step="{{ step }}">
 {% if message %}
 <p class="error">{{ message }}</p>
 {% endif %}
 
-<form hx-post="/ui/ingest/confirm" hx-target="#result" hx-swap="innerHTML">
+<form hx-post="/ingest/confirm" hx-target="#result" hx-swap="innerHTML">
   <input type="hidden" name="upload_token" value="{{ upload_token }}" />
   <input type="hidden" name="original_filename" value="{{ original_filename }}" />
 
@@ -20,3 +21,4 @@
 
   <button type="submit">Confirm &amp; Save</button>
 </form>
+</div>

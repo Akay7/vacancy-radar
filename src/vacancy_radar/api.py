@@ -1,21 +1,25 @@
-"""FastAPI app: /analyze, /similar, /ingest (upload UI), /healthz.
+"""FastAPI app: /api/analyze, /api/similar (JSON), /, /analyze, /ingest, /ingest/draft,
+/ingest/confirm (HTML), /healthz.
 
-M1 scaffold — only /healthz was live initially. /similar, /analyze, and the /ui/analyze +
-/ingest upload flow are all implemented now. The original M1 stub, a bare `POST /ingest/vacancy`
-taking a `vacancy_folder` path string, was removed (never implemented, never returned anything
-but 501) in favor of the real upload flow at GET /ingest + POST /ui/ingest/draft +
-POST /ui/ingest/confirm (specs/006-vacancy-upload), matching the existing /ui/analyze
-naming convention rather than reusing that original path.
+M1 scaffold — only /healthz was live initially. The JSON API lives under /api/* and the
+browser-facing HTML routes are unprefixed (specs/008-ingest-flow-clarity route restructuring —
+previously the JSON routes were unprefixed and the HTML routes carried a /ui/ prefix). The
+original M1 stub, a bare `POST /ingest/vacancy` taking a `vacancy_folder` path string, was
+removed (never implemented, never returned anything but 501) in favor of the real upload flow at
+GET /ingest + POST /ingest/draft + POST /ingest/confirm (specs/006-vacancy-upload).
 """
 
 import json
 import os
 import shutil
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
@@ -28,8 +32,9 @@ from vacancy_radar.filter_rules import load_filter_rules
 from vacancy_radar.grounding import enforce
 from vacancy_radar.llm.base import LLMProvider, LLMProviderError
 from vacancy_radar.llm.claude import ClaudeProvider
+from vacancy_radar.llm.config import LLMConfig
 from vacancy_radar.llm.ollama import OllamaProvider
-from vacancy_radar.models import Report, SimilarVacancy, VacancyRecord
+from vacancy_radar.models import DraftVacancyMetadata, Report, SimilarVacancy, VacancyRecord
 from vacancy_radar.retriever import Retriever
 
 PENDING_UPLOADS_DIR = Path(".cache/pending-uploads")
@@ -40,9 +45,38 @@ SUPPORTED_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".png", ".jpg", ".jpeg", ".txt",
 # (specs/005-minimal-ui/research.md #6).
 BASE_DIR = Path(__file__).resolve().parent
 
-app = FastAPI(title="Vacancy Radar", version="0.1.0")
+
+def validate_llm_provider_config() -> None:
+    """Fail fast on missing/invalid configuration for the configured LLM provider
+    (specs/009-analyze-and-log-vacancy) — e.g. `anthropic.Anthropic()` does not validate its API
+    key at construction, so an unset `ANTHROPIC_API_KEY` would otherwise surface as a bare
+    `TypeError` on the first real request instead of the intended `LLMProviderError` path.
+    Ollama needs no equivalent check: `OLLAMA_HOST`/`OLLAMA_MODEL` both have working defaults and
+    there is no secret to be missing.
+    """
+    try:
+        config = LLMConfig()
+    except ValidationError as exc:
+        raise RuntimeError(f"Invalid LLM configuration: {exc}") from exc
+
+    if config.llm_provider == "claude" and not config.anthropic_api_key:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set. It's required when LLM_PROVIDER=claude (the "
+            "default). Set it in your environment or .env, or set LLM_PROVIDER=ollama for a "
+            "fully local/offline setup."
+        )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    validate_llm_provider_config()
+    yield
+
+
+app = FastAPI(title="Vacancy Radar", version="0.1.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+api_router = APIRouter(prefix="/api")
 
 
 def get_chroma_store() -> ChromaStore:
@@ -57,8 +91,8 @@ def get_retriever(
     store: ChromaStore = Depends(get_chroma_store),
     embedder: Embedder = Depends(get_embedder),
 ) -> Retriever:
-    """Composed from get_chroma_store()/get_embedder() so POST /ui/ingest/confirm can write to
-    (and /similar, /analyze read from) the exact same store — overriding just those two
+    """Composed from get_chroma_store()/get_embedder() so POST /ingest/confirm can write to
+    (and /api/similar, /api/analyze read from) the exact same store — overriding just those two
     dependencies in tests keeps every route consistent without also overriding get_retriever
     (specs/006-vacancy-upload)."""
     return Retriever(store=store, embedder=embedder)
@@ -69,11 +103,9 @@ def get_vacancy_dir() -> Path:
 
 
 def get_llm_provider() -> LLMProvider:
-    if os.environ.get("LLM_PROVIDER", "claude") == "ollama":
-        return OllamaProvider(
-            model=os.environ.get("OLLAMA_MODEL", "qwen3:8b"),
-            host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
-        )
+    config = LLMConfig()
+    if config.llm_provider == "ollama":
+        return OllamaProvider(model=config.ollama_model, host=config.ollama_host)
     return ClaudeProvider()
 
 
@@ -83,7 +115,7 @@ def healthz() -> dict[str, str]:
 
 
 def run_analysis(jd_text: str, retriever: Retriever, llm_provider: LLMProvider) -> Report:
-    """Shared orchestration behind both `POST /analyze` (JSON) and `POST /ui/analyze` (HTML).
+    """Shared orchestration behind both `POST /api/analyze` (JSON) and `POST /analyze` (HTML).
 
     Assumes `jd_text` is already validated as non-empty by the caller — the two routes render
     that failure differently (a 422 vs. an HTML validation message), so it isn't handled here.
@@ -112,7 +144,7 @@ def run_analysis(jd_text: str, retriever: Retriever, llm_provider: LLMProvider) 
     )
 
 
-@app.post("/analyze", response_model=Report)
+@api_router.post("/analyze", response_model=Report)
 def analyze(
     jd_text: str,
     retriever: Retriever = Depends(get_retriever),
@@ -129,16 +161,49 @@ def analyze(
 
 @app.get("/")
 def index(request: Request):
-    return templates.TemplateResponse(request, "index.html", {})
+    return templates.TemplateResponse(request, "index.html", {"active_page": "analyze"})
 
 
-@app.post("/ui/analyze")
+@app.post("/analyze")
 def ui_analyze(
     request: Request,
-    jd_text: str = Form(...),
+    jd_text: str = Form(""),
+    file: UploadFile | None = File(None),
     retriever: Retriever = Depends(get_retriever),
     llm_provider: LLMProvider = Depends(get_llm_provider),
 ):
+    if file is not None and file.filename:
+        staged = _stage_and_read_upload(file)
+        if isinstance(staged, str):
+            return templates.TemplateResponse(request, "_error.html", {"message": staged})
+
+        draft, draft_message = _draft_metadata(staged, llm_provider)
+        query_text, report_message = _query_text_for_analysis(staged, llm_provider)
+
+        report = None
+        if query_text:
+            try:
+                report = run_analysis(query_text, retriever, llm_provider)
+            except (LLMProviderError, ValidationError, json.JSONDecodeError):
+                report_message = (
+                    "The analysis backend is unavailable right now. Check your LLM_PROVIDER "
+                    "configuration and try again."
+                )
+
+        return templates.TemplateResponse(
+            request,
+            "_report.html",
+            {
+                "report": report,
+                "report_message": report_message,
+                "draft": draft,
+                "message": draft_message,
+                "upload_token": staged.token,
+                "original_filename": staged.filename,
+                "step": "review" if draft else "error",
+            },
+        )
+
     if not jd_text.strip():
         message = "Paste a job posting before submitting."
         return templates.TemplateResponse(request, "_error.html", {"message": message})
@@ -157,23 +222,31 @@ def ui_analyze(
 
 @app.get("/ingest")
 def ingest_page(request: Request):
-    return templates.TemplateResponse(request, "ingest.html", {})
+    return templates.TemplateResponse(request, "ingest.html", {"active_page": "ingest"})
 
 
-@app.post("/ui/ingest/draft")
-def ingest_draft(
-    request: Request,
-    file: UploadFile,
-    llm_provider: LLMProvider = Depends(get_llm_provider),
-):
+class StagedUpload(NamedTuple):
+    """A file staged to disk under PENDING_UPLOADS_DIR, plus what was read from it for LLM
+    use — shared by POST /ingest/draft and POST /analyze's upload branch
+    (specs/009-analyze-and-log-vacancy) so both stage/extract identically."""
+
+    token: str
+    filename: str
+    document_text: str
+    image_bytes: bytes | None
+    image_media_type: str | None
+
+
+def _stage_and_read_upload(file: UploadFile) -> StagedUpload | str:
+    """Stages an uploaded file and reads its content for LLM use. Returns a `StagedUpload` on
+    success, or a user-facing error message string if the file type isn't supported."""
     filename = file.filename or ""
     suffix = Path(filename).suffix.lower()
     if not filename or suffix not in SUPPORTED_UPLOAD_EXTENSIONS:
-        message = (
+        return (
             "Unsupported file type. Please upload an image (.png/.jpg/.jpeg), PDF, DOCX, or "
             "plain text (.txt/.md) file."
         )
-        return templates.TemplateResponse(request, "_error.html", {"message": message})
 
     token = uuid.uuid4().hex
     staging_dir = PENDING_UPLOADS_DIR / token
@@ -192,28 +265,75 @@ def ingest_draft(
     else:
         document_text = documents.extract_text(staged_path)
 
-    draft = None
-    message = None
-    if not document_text and image_bytes is None:
-        message = (
+    return StagedUpload(token, filename, document_text, image_bytes, image_media_type)
+
+
+def _draft_metadata(
+    staged: StagedUpload, llm_provider: LLMProvider
+) -> tuple[DraftVacancyMetadata | None, str | None]:
+    """Drafts company/position/date from a staged upload, or returns a user-facing message
+    explaining why drafting didn't happen — shared by POST /ingest/draft and POST /analyze's
+    upload branch (specs/009-analyze-and-log-vacancy)."""
+    if not staged.document_text and staged.image_bytes is None:
+        return None, (
             "Couldn't read any text from this document — fill in every field manually below."
         )
-    else:
-        try:
-            draft = llm_provider.draft_vacancy_metadata(
-                document_text, image_bytes=image_bytes, image_media_type=image_media_type
+
+    try:
+        draft = llm_provider.draft_vacancy_metadata(
+            staged.document_text,
+            image_bytes=staged.image_bytes,
+            image_media_type=staged.image_media_type,
+        )
+        return draft, None
+    except (LLMProviderError, ValidationError, json.JSONDecodeError):
+        if staged.image_bytes is not None:
+            return None, (
+                "Your configured LLM backend couldn't read this image directly — "
+                "image-based drafting isn't available with the current setup. Fill in "
+                "every field manually below, or switch to a vision-capable model."
             )
-        except (LLMProviderError, ValidationError, json.JSONDecodeError):
-            if image_bytes is not None:
-                message = (
-                    "Your configured LLM backend couldn't read this image directly — "
-                    "image-based drafting isn't available with the current setup. Fill in "
-                    "every field manually below, or switch to a vision-capable model."
-                )
-            else:
-                message = (
-                    "Automatic drafting didn't work — fill in every field manually below."
-                )
+        return None, "Automatic drafting didn't work — fill in every field manually below."
+
+
+def _query_text_for_analysis(
+    staged: StagedUpload, llm_provider: LLMProvider
+) -> tuple[str | None, str | None]:
+    """Resolves the text `run_analysis()` should treat as `jd_text` for a staged upload, or a
+    user-facing message explaining why analysis can't proceed (specs/009-analyze-and-log-vacancy).
+
+    Non-image uploads already have real text via `documents.extract_text()`. Images have none —
+    there's no local OCR (specs/007-vision-drafting) — so `extract_document_text()`'s vision
+    transcription is used instead, purely to give retrieval something to embed
+    (research.md #2); it never fabricates content, so a failure here surfaces the same way a
+    missing document_text does.
+    """
+    if staged.image_bytes is not None:
+        try:
+            text = llm_provider.extract_document_text(staged.image_bytes, staged.image_media_type)
+            return text, None
+        except LLMProviderError:
+            return None, (
+                "Your configured LLM backend couldn't read this image directly — "
+                "image-based analysis isn't available with the current setup."
+            )
+
+    if staged.document_text:
+        return staged.document_text, None
+    return None, "Couldn't read any text from this document to analyze."
+
+
+@app.post("/ingest/draft")
+def ingest_draft(
+    request: Request,
+    file: UploadFile,
+    llm_provider: LLMProvider = Depends(get_llm_provider),
+):
+    staged = _stage_and_read_upload(file)
+    if isinstance(staged, str):
+        return templates.TemplateResponse(request, "_error.html", {"message": staged})
+
+    draft, message = _draft_metadata(staged, llm_provider)
 
     return templates.TemplateResponse(
         request,
@@ -221,13 +341,14 @@ def ingest_draft(
         {
             "draft": draft,
             "message": message,
-            "upload_token": token,
-            "original_filename": filename,
+            "upload_token": staged.token,
+            "original_filename": staged.filename,
+            "step": "review" if draft else "error",
         },
     )
 
 
-@app.post("/ui/ingest/confirm")
+@app.post("/ingest/confirm")
 def ingest_confirm(
     request: Request,
     upload_token: str = Form(...),
@@ -246,7 +367,9 @@ def ingest_confirm(
 ):
     def result(message: str, success: bool):
         return templates.TemplateResponse(
-            request, "_ingest_result.html", {"message": message, "success": success}
+            request,
+            "_ingest_result.html",
+            {"message": message, "success": success, "step": "done" if success else "error"},
         )
 
     if not (company.strip() and position.strip() and date.strip() and outcome.strip()):
@@ -304,10 +427,13 @@ def ingest_confirm(
     return result(f"Saved vacancy '{key}' — it's already searchable.", success=True)
 
 
-@app.post("/similar", response_model=list[SimilarVacancy])
+@api_router.post("/similar", response_model=list[SimilarVacancy])
 def similar(
     jd_text: str, retriever: Retriever = Depends(get_retriever)
 ) -> list[SimilarVacancy]:
     if not jd_text.strip():
         raise HTTPException(status_code=422, detail="jd_text must not be empty")
     return retriever.query_similar_vacancies(jd_text)
+
+
+app.include_router(api_router)

@@ -20,6 +20,7 @@ from vacancy_radar.llm.prompts import (
     build_analyze_prompt,
     build_draft_metadata_prompt,
     build_draft_metadata_vision_prompt,
+    build_extract_document_text_vision_prompt,
 )
 from vacancy_radar.models import CandidateReport, DraftVacancyMetadata
 
@@ -128,3 +129,36 @@ class ClaudeProvider(LLMProvider):
         if not data.get("date"):
             data["date"] = date.today().isoformat()
         return DraftVacancyMetadata.model_validate(data)
+
+    def extract_document_text(self, image_bytes: bytes, image_media_type: str) -> str:
+        """Vision-based text extraction for image analysis (specs/009-analyze-and-log-vacancy)
+        — plain text out, no output_config: unlike draft/analyze, this isn't validated against a
+        schema."""
+        prompt = build_extract_document_text_vision_prompt()
+        image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+
+        try:
+            response = self._client.messages.create(
+                model=self.model,
+                max_tokens=2048,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": image_media_type,
+                                    "data": image_b64,
+                                },
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+            )
+        except anthropic.APIError as exc:
+            raise LLMProviderError(f"Claude vision request failed: {exc}") from exc
+
+        return next(block.text for block in response.content if block.type == "text")

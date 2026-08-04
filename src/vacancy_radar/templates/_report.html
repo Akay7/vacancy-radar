@@ -1,4 +1,5 @@
 <section class="report">
+  {% if report %}
   {% if not report.flags and not report.citations and not report.draft_paragraph %}
   <p class="nothing-to-show">
     Nothing to show yet — no experience data has been ingested, so this posting couldn't be
@@ -52,4 +53,13 @@
     {% endfor %}
   </ul>
   {% endif %}
+  {% elif report_message %}
+  <p class="error">{{ report_message }}</p>
+  {% endif %}
 </section>
+
+{% if upload_token %}
+<hr />
+<h2>Log this vacancy</h2>
+{% include "_ingest_draft.html" %}
+{% endif %}

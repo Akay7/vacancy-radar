@@ -29,10 +29,12 @@ def test_ingest_command_end_to_end(project_dir, capsys):
     assert exit_code == 0
 
     captured = capsys.readouterr()
-    assert "bullets_ingested=8" in captured.out
-    assert "vacancies_created=2" in captured.out
-    assert "INVALID" in captured.err
-    assert "CONFLICT" in captured.err
+    assert "CV_DIR:      example" in captured.out
+    assert "VACANCY_DIR: example/vacancies" in captured.out
+    assert "Ingested 8 CV bullets" in captured.out
+    assert "Created 2 new vacancies" in captured.out
+    assert "Invalid folder" in captured.err
+    assert "Conflict" in captured.err
 
 
 def test_ingest_is_idempotent_across_cli_invocations(project_dir, capsys):
@@ -42,8 +44,8 @@ def test_ingest_is_idempotent_across_cli_invocations(project_dir, capsys):
     # the manifest already knows these natural keys, so they're reported as updated, not created.
     cli.main(["ingest"])
     captured = capsys.readouterr()
-    assert "vacancies_created=0" in captured.out
-    assert "vacancies_updated=2" in captured.out
+    assert "Created 0 new vacancies" in captured.out
+    assert "Updated 2 vacancies" in captured.out
 
     store = ingest.ChromaStore(ingest.CHROMA_PATH)
     assert store.count(ingest.VACANCIES_COLLECTION) == 6
@@ -67,9 +69,9 @@ def test_sync_command_incremental(project_dir, capsys):
     exit_code = cli.main(["sync"])
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "vacancies_created=1" in captured.out
-    assert "vacancies_updated=1" in captured.out
-    assert "vacancies_skipped=1" in captured.out
+    assert "Created 1 new vacancy" in captured.out
+    assert "Updated 1 vacancy" in captured.out
+    assert "Skipped 1 unchanged vacancy" in captured.out
 
 
 def test_sync_does_not_clean_up_deleted_folder(project_dir):
@@ -95,9 +97,9 @@ def test_sync_after_compat_mismatch_reembeds_everything(project_dir, capsys):
 
     cli.main(["sync"])
     captured = capsys.readouterr()
-    assert "vacancies_created=0" in captured.out
-    assert "vacancies_updated=2" in captured.out
-    assert "vacancies_skipped=0" in captured.out
+    assert "Created 0 new vacancies" in captured.out
+    assert "Updated 2 vacancies" in captured.out
+    assert "Skipped 0 unchanged vacancies" in captured.out
 
 
 @pytest.mark.parametrize("command", ["ingest", "sync", "reindex"])
@@ -119,7 +121,7 @@ def test_ingest_tolerates_missing_cv_dir(project_dir, monkeypatch, capsys):
     exit_code = cli.main(["ingest"])
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "bullets_ingested=0" in captured.out
+    assert "Ingested 0 CV bullets" in captured.out
 
 
 def _hash_tree(root: Path) -> dict[str, str]:
@@ -141,8 +143,8 @@ def test_reindex_matches_fresh_ingest_and_preserves_source(project_dir, capsys):
     exit_code = cli.main(["reindex"])
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "bullets_ingested=8" in captured.out
-    assert "vacancies_created=2" in captured.out
+    assert "Ingested 8 CV bullets" in captured.out
+    assert "Created 2 new vacancies" in captured.out
 
     source_after = _hash_tree(project_dir / "example")
     assert source_before == source_after

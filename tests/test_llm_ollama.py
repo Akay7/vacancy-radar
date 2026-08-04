@@ -188,3 +188,36 @@ def test_draft_vacancy_metadata_raises_llm_provider_error_on_vision_failure_no_f
 
     # exactly one attempt was made — no fallback retry
     assert len(calls) == 1
+
+
+# --- Vision-based text extraction for image analysis (specs/009-analyze-and-log-vacancy) --
+
+
+def test_extract_document_text_sends_images_field_and_returns_plain_text(monkeypatch):
+    calls = []
+
+    def fake_post(url, json, timeout):
+        calls.append(json)
+        return _FakeResponse("Backend Engineer role at Acme Corp...")
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = OllamaProvider()
+
+    result = provider.extract_document_text(b"fake-png-bytes", "image/png")
+
+    assert len(calls) == 1
+    images = calls[0]["messages"][0]["images"]
+    assert len(images) == 1 and images[0]  # non-empty base64 string
+    assert "format" not in calls[0]  # plain text response, not JSON-constrained
+    assert result == "Backend Engineer role at Acme Corp..."
+
+
+def test_extract_document_text_raises_llm_provider_error_on_connection_failure(monkeypatch):
+    def fake_post(url, json, timeout):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = OllamaProvider()
+
+    with pytest.raises(LLMProviderError):
+        provider.extract_document_text(b"fake-png-bytes", "image/png")
