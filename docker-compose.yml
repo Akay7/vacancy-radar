@@ -6,14 +6,16 @@ services:
     env_file:
       - .env
     volumes:
+      # `z` relabels the bind mount for SELinux (Fedora/RHEL hosts running Podman would
+      # otherwise deny the container access); it is a documented no-op elsewhere.
       # read-write: specs/006-vacancy-upload writes new vacancy folders here (confirmed uploads)
-      - ./data/user:/data/user
-      - ./data/example:/data/example:ro
-      - ./.cache:/app/.cache
+      - ./data/user:/data/user:z
+      - ./data/example:/data/example:ro,z
+      - ./.cache:/app/.cache:z
 
-  # LLM_PROVIDER=ollama in .env to use this instead of the Claude API
+  # Leave ANTHROPIC_API_KEY blank in .env to use this instead of the Claude API
   ollama:
-    image: ollama/ollama
+    image: docker.io/ollama/ollama:latest
     profiles: ["local"]
     ports:
       - "11434:11434"

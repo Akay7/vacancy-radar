@@ -1,0 +1,50 @@
+{
+  // One config for the whole CLI: F5 opens a quick-pick of subcommands.
+  // Runs the package as a module rather than the `vacancy-radar` console script, so the
+  // debugger owns the process from the first line — no wrapper in between.
+  // `envFile` is the same `.env` the compose stack reads (`cp .env.example .env`); it is
+  // optional, since CV_DIR/VACANCY_DIR already default to `data/example`.
+  // Tests are not here on purpose — the Test Explorer runs and debugs those.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "vacancy-radar",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "vacancy_radar.cli",
+      // String form (not an array): the value goes through the shell, so a pick like
+      // "serve --reload" splits into two argv entries. An array would pass it as one.
+      "args": "${input:command}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      // Needed by `serve --reload`: uvicorn forks a reloader child and breakpoints only
+      // bind there. Inert for the other subcommands, which never fork.
+      "subProcess": true,
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "eval: run_eval.py",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/eval/run_eval.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "envFile": "${workspaceFolder}/.env"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "command",
+      "type": "pickString",
+      "description": "vacancy-radar subcommand",
+      "default": "serve",
+      "options": [
+        { "label": "serve — web UI on http://localhost:8000", "value": "serve" },
+        { "label": "serve --reload — auto-reload on source changes", "value": "serve --reload" },
+        { "label": "ingest — full re-embed of CV_DIR + VACANCY_DIR", "value": "ingest" },
+        { "label": "sync — upsert only new/changed vacancy folders", "value": "sync" },
+        { "label": "reindex — delete .cache, then re-embed from source", "value": "reindex" }
+      ]
+    }
+  ]
+}

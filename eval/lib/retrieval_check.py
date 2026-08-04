@@ -8,12 +8,14 @@ default (research.md #1) — a fake is only substituted in this module's own uni
 
 from pathlib import Path
 
+from langchain_core.embeddings import Embeddings
+
 from eval.lib import metrics
 from eval.lib.fixtures import load_jsonl
 from eval.lib.report import CheckResult, FixtureFailure
 from vacancy_radar import ingest
 from vacancy_radar.chroma_store import ChromaStore
-from vacancy_radar.embedder import Embedder, SentenceTransformersEmbedder
+from vacancy_radar.embedder import get_embeddings
 from vacancy_radar.retriever import Retriever
 
 GOLDEN_PATH = Path("eval/golden/bullets.jsonl")
@@ -29,14 +31,14 @@ def run(
     fixtures_cv_dir: Path = FIXTURES_CV_DIR,
     chroma_path: str = EVAL_CHROMA_PATH,
     store: ChromaStore | None = None,
-    embedder: Embedder | None = None,
+    embedder: Embeddings | None = None,
 ) -> CheckResult:
     rows = load_jsonl(golden_path)
     if not rows:
         return CheckResult(name="bullet_retrieval", status="skipped")
 
     store = store or ChromaStore(chroma_path)
-    embedder = embedder or SentenceTransformersEmbedder()
+    embedder = embedder or get_embeddings()
     bullet_count = ingest.ingest_experience_bullets(fixtures_cv_dir, store=store, embedder=embedder)
     existing_ids = {f"bullet-{i}" for i in range(bullet_count)}
     retriever = Retriever(store=store, embedder=embedder)

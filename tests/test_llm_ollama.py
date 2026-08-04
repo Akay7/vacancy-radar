@@ -2,6 +2,7 @@ import json
 from datetime import date
 
 import httpx
+import ollama
 import pytest
 
 from vacancy_radar.llm.base import LLMProviderError
@@ -23,66 +24,78 @@ VALID_CANDIDATE = {
 }
 
 
-class _FakeResponse:
-    def __init__(self, content: str) -> None:
-        self._content = content
+class _FakeOllamaClient:
+    """Fakes ollama._client.Client.chat() — ChatOllama's non-streaming _generate() path
+    actually always drives the client in streaming mode internally (verified), so .chat()
+    must return an iterator of ollama.ChatResponse chunks, not a single response."""
 
-    def raise_for_status(self) -> None:
-        pass
+    def __init__(self, contents: list[str] | None = None, error: Exception | None = None) -> None:
+        self._contents = list(contents) if contents is not None else None
+        self._error = error
+        self.calls: list[dict] = []
 
-    def json(self) -> dict:
-        return {"message": {"content": self._content}}
+    def chat(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._error:
+            raise self._error
+        content = self._contents.pop(0)
+        yield ollama.ChatResponse(
+            model="qwen3:8b",
+            created_at="2026-01-01T00:00:00Z",
+            done=True,
+            done_reason="stop",
+            message=ollama.Message(role="assistant", content=content),
+        )
 
 
-def test_analyze_parses_valid_json_on_first_try(monkeypatch):
-    calls = []
-    valid_response_body = json.dumps(VALID_CANDIDATE)
-
-    def fake_post(url, json, timeout):
-        calls.append(json)
-        return _FakeResponse(valid_response_body)
-
-    monkeypatch.setattr(httpx, "post", fake_post)
+def _provider_with_fake_client(fake_client: _FakeOllamaClient) -> OllamaProvider:
     provider = OllamaProvider()
+    provider._chat_model._client = fake_client
+    return provider
+
+
+def test_analyze_parses_valid_json_on_first_try():
+    fake_client = _FakeOllamaClient(contents=[json.dumps(VALID_CANDIDATE)])
+    provider = _provider_with_fake_client(fake_client)
 
     result = provider.analyze("JD", [("bullet-0", "Built a FastAPI service")], "")
 
     assert result.match_band == "good"
-    assert len(calls) == 1
+    assert len(fake_client.calls) == 1
 
 
-def test_analyze_retries_once_on_invalid_json(monkeypatch):
-    responses = [_FakeResponse("not json at all"), _FakeResponse(json.dumps(VALID_CANDIDATE))]
+def test_analyze_sends_json_schema_structured_output():
+    fake_client = _FakeOllamaClient(contents=[json.dumps(VALID_CANDIDATE)])
+    provider = _provider_with_fake_client(fake_client)
 
-    def fake_post(url, json, timeout):
-        return responses.pop(0)
+    provider.analyze("JD", [("bullet-0", "text")], "")
 
-    monkeypatch.setattr(httpx, "post", fake_post)
-    provider = OllamaProvider()
+    assert "match_band" in fake_client.calls[0]["format"]["properties"]
+
+
+def test_analyze_retries_once_on_invalid_json():
+    fake_client = _FakeOllamaClient(contents=["not json at all", json.dumps(VALID_CANDIDATE)])
+    provider = _provider_with_fake_client(fake_client)
 
     result = provider.analyze("JD", [("bullet-0", "text")], "")
 
     assert result.match_band == "good"
-    assert responses == []  # both queued responses were consumed
+    assert len(fake_client.calls) == 2
 
 
-def test_analyze_raises_after_second_invalid_json(monkeypatch):
-    def fake_post(url, json, timeout):
-        return _FakeResponse("still not json")
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    provider = OllamaProvider()
+def test_analyze_raises_after_second_invalid_json():
+    fake_client = _FakeOllamaClient(contents=["still not json", "still not json either"])
+    provider = _provider_with_fake_client(fake_client)
 
     with pytest.raises(LLMProviderError):
         provider.analyze("JD", [("bullet-0", "text")], "")
 
+    assert len(fake_client.calls) == 2  # one retry, then give up
 
-def test_analyze_raises_llm_provider_error_on_connection_failure(monkeypatch):
-    def fake_post(url, json, timeout):
-        raise httpx.ConnectError("connection refused")
 
-    monkeypatch.setattr(httpx, "post", fake_post)
-    provider = OllamaProvider()
+def test_analyze_raises_llm_provider_error_on_connection_failure():
+    fake_client = _FakeOllamaClient(error=httpx.ConnectError("connection refused"))
+    provider = _provider_with_fake_client(fake_client)
 
     with pytest.raises(LLMProviderError):
         provider.analyze("JD", [("bullet-0", "text")], "")
@@ -95,12 +108,9 @@ BLANK_DATE_DRAFT_JSON = json.dumps(
 )
 
 
-def test_draft_vacancy_metadata_parses_valid_json_on_first_try(monkeypatch):
-    def fake_post(url, json, timeout):
-        return _FakeResponse(VALID_DRAFT_JSON)
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    provider = OllamaProvider()
+def test_draft_vacancy_metadata_parses_valid_json_on_first_try():
+    fake_client = _FakeOllamaClient(contents=[VALID_DRAFT_JSON])
+    provider = _provider_with_fake_client(fake_client)
 
     result = provider.draft_vacancy_metadata("Acme Corp is hiring a Backend Engineer...")
 
@@ -108,39 +118,28 @@ def test_draft_vacancy_metadata_parses_valid_json_on_first_try(monkeypatch):
     assert result.date.isoformat() == "2026-01-15"
 
 
-def test_draft_vacancy_metadata_defaults_date_to_today_when_blank(monkeypatch):
-    def fake_post(url, json, timeout):
-        return _FakeResponse(BLANK_DATE_DRAFT_JSON)
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    provider = OllamaProvider()
+def test_draft_vacancy_metadata_defaults_date_to_today_when_blank():
+    fake_client = _FakeOllamaClient(contents=[BLANK_DATE_DRAFT_JSON])
+    provider = _provider_with_fake_client(fake_client)
 
     result = provider.draft_vacancy_metadata("some document text with no date mentioned")
 
     assert result.date == date.today()
 
 
-def test_draft_vacancy_metadata_retries_once_on_invalid_json(monkeypatch):
-    responses = [_FakeResponse("not json at all"), _FakeResponse(VALID_DRAFT_JSON)]
-
-    def fake_post(url, json, timeout):
-        return responses.pop(0)
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    provider = OllamaProvider()
+def test_draft_vacancy_metadata_retries_once_on_invalid_json():
+    fake_client = _FakeOllamaClient(contents=["not json at all", VALID_DRAFT_JSON])
+    provider = _provider_with_fake_client(fake_client)
 
     result = provider.draft_vacancy_metadata("some document text")
 
     assert result.company == "Acme Corp"
-    assert responses == []
+    assert len(fake_client.calls) == 2
 
 
-def test_draft_vacancy_metadata_raises_llm_provider_error_on_connection_failure(monkeypatch):
-    def fake_post(url, json, timeout):
-        raise httpx.ConnectError("connection refused")
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    provider = OllamaProvider()
+def test_draft_vacancy_metadata_raises_llm_provider_error_on_connection_failure():
+    fake_client = _FakeOllamaClient(error=httpx.ConnectError("connection refused"))
+    provider = _provider_with_fake_client(fake_client)
 
     with pytest.raises(LLMProviderError):
         provider.draft_vacancy_metadata("some document text")
@@ -149,37 +148,23 @@ def test_draft_vacancy_metadata_raises_llm_provider_error_on_connection_failure(
 # --- Vision-based drafting for image uploads (specs/007-vision-drafting) -----------------
 
 
-def test_draft_vacancy_metadata_sends_images_field_for_image(monkeypatch):
-    calls = []
-
-    def fake_post(url, json, timeout):
-        calls.append(json)
-        return _FakeResponse(VALID_DRAFT_JSON)
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    provider = OllamaProvider()
+def test_draft_vacancy_metadata_sends_images_field_for_image():
+    fake_client = _FakeOllamaClient(contents=[VALID_DRAFT_JSON])
+    provider = _provider_with_fake_client(fake_client)
 
     result = provider.draft_vacancy_metadata(
         "", image_bytes=b"fake-png-bytes", image_media_type="image/png"
     )
 
-    assert len(calls) == 1
-    images = calls[0]["messages"][0]["images"]
+    assert len(fake_client.calls) == 1
+    images = fake_client.calls[0]["messages"][0]["images"]
     assert len(images) == 1 and images[0]  # non-empty base64 string
     assert result.company == "Acme Corp"
 
 
-def test_draft_vacancy_metadata_raises_llm_provider_error_on_vision_failure_no_fallback(
-    monkeypatch,
-):
-    calls = []
-
-    def fake_post(url, json, timeout):
-        calls.append(json)
-        raise httpx.ConnectError("connection refused")
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    provider = OllamaProvider()
+def test_draft_vacancy_metadata_raises_llm_provider_error_on_vision_failure_no_fallback():
+    fake_client = _FakeOllamaClient(error=httpx.ConnectError("connection refused"))
+    provider = _provider_with_fake_client(fake_client)
 
     with pytest.raises(LLMProviderError):
         provider.draft_vacancy_metadata(
@@ -187,37 +172,28 @@ def test_draft_vacancy_metadata_raises_llm_provider_error_on_vision_failure_no_f
         )
 
     # exactly one attempt was made — no fallback retry
-    assert len(calls) == 1
+    assert len(fake_client.calls) == 1
 
 
 # --- Vision-based text extraction for image analysis (specs/009-analyze-and-log-vacancy) --
 
 
-def test_extract_document_text_sends_images_field_and_returns_plain_text(monkeypatch):
-    calls = []
-
-    def fake_post(url, json, timeout):
-        calls.append(json)
-        return _FakeResponse("Backend Engineer role at Acme Corp...")
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    provider = OllamaProvider()
+def test_extract_document_text_sends_images_field_and_returns_plain_text():
+    fake_client = _FakeOllamaClient(contents=["Backend Engineer role at Acme Corp..."])
+    provider = _provider_with_fake_client(fake_client)
 
     result = provider.extract_document_text(b"fake-png-bytes", "image/png")
 
-    assert len(calls) == 1
-    images = calls[0]["messages"][0]["images"]
-    assert len(images) == 1 and images[0]  # non-empty base64 string
-    assert "format" not in calls[0]  # plain text response, not JSON-constrained
+    assert len(fake_client.calls) == 1
+    images = fake_client.calls[0]["messages"][0]["images"]
+    assert len(images) == 1 and images[0]
+    assert fake_client.calls[0].get("format") is None  # plain text, not JSON-constrained
     assert result == "Backend Engineer role at Acme Corp..."
 
 
-def test_extract_document_text_raises_llm_provider_error_on_connection_failure(monkeypatch):
-    def fake_post(url, json, timeout):
-        raise httpx.ConnectError("connection refused")
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    provider = OllamaProvider()
+def test_extract_document_text_raises_llm_provider_error_on_connection_failure():
+    fake_client = _FakeOllamaClient(error=httpx.ConnectError("connection refused"))
+    provider = _provider_with_fake_client(fake_client)
 
     with pytest.raises(LLMProviderError):
         provider.extract_document_text(b"fake-png-bytes", "image/png")

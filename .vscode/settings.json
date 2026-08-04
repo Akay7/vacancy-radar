@@ -1,0 +1,35 @@
+{
+  // The uv-managed venv (`uv sync --extra dev`). Pointing at it explicitly means the
+  // Test Explorer, Pylance and the debug configs all agree on one interpreter.
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  // `testpaths` in pyproject.toml already scopes discovery; naming it here too keeps the
+  // Test Explorer from walking eval/ and data/ before pytest's own config is read.
+  "python.testing.pytestArgs": ["tests"],
+  "python.testing.autoTestDiscoverOnSaveEnabled": true,
+
+  "ruff.importStrategy": "fromEnvironment",
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      // ruff's lint `select` includes "I", so import order is a lint error, not just style.
+      "source.organizeImports.ruff": "explicit"
+    }
+  },
+  // Matches [tool.ruff] line-length.
+  "editor.rulers": [100],
+
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.egg-info": true,
+    ".pytest_cache": true,
+    ".ruff_cache": true
+  },
+  "files.watcherExclude": {
+    "**/.venv/**": true,
+    "**/.cache/**": true
+  }
+}

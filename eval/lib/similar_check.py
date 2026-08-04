@@ -7,12 +7,14 @@ the way `/similar` does via `Retriever.query_similar_vacancies()`.
 
 from pathlib import Path
 
+from langchain_core.embeddings import Embeddings
+
 from eval.lib import metrics
 from eval.lib.fixtures import load_jsonl
 from eval.lib.report import CheckResult, FixtureFailure
 from vacancy_radar import ingest
 from vacancy_radar.chroma_store import ChromaStore
-from vacancy_radar.embedder import Embedder, SentenceTransformersEmbedder
+from vacancy_radar.embedder import get_embeddings
 from vacancy_radar.retriever import Retriever
 
 GOLDEN_PATH = Path("eval/golden/similar.jsonl")
@@ -38,14 +40,14 @@ def run(
     fixtures_vacancies_dir: Path = FIXTURES_VACANCIES_DIR,
     chroma_path: str = EVAL_CHROMA_PATH,
     store: ChromaStore | None = None,
-    embedder: Embedder | None = None,
+    embedder: Embeddings | None = None,
 ) -> CheckResult:
     rows = load_jsonl(golden_path)
     if not rows:
         return CheckResult(name="similar_vacancy", status="skipped")
 
     store = store or ChromaStore(chroma_path)
-    embedder = embedder or SentenceTransformersEmbedder()
+    embedder = embedder or get_embeddings()
     ingest.ingest_vacancies(fixtures_vacancies_dir, store=store, embedder=embedder)
     existing_ids = _existing_natural_keys(fixtures_vacancies_dir)
     retriever = Retriever(store=store, embedder=embedder)

@@ -1,6 +1,9 @@
-"""Thin wrapper around the embedded Chroma client.
+"""Thin wrapper around the embedded Chroma client — ingestion/upsert side only
+(specs/010-langchain-integration moved retrieval onto langchain-chroma's `Chroma`, which needs
+this same underlying `chromadb.PersistentClient` — see `.client` below — not a second one
+pointed at the same path).
 
-One client, one path (`.cache/chroma`), shared by ingestion and (later) retrieval — so the
+One client, one path (`.cache/chroma`), shared by ingestion and retrieval — so the
 disposable-cache contract (delete the directory, rebuild from source) only ever has one
 directory to delete.
 """
@@ -17,6 +20,13 @@ class ChromaStore:
         # ensures two ChromaStores that mean different directories (e.g. relative to different
         # cwds, as in tests) never collide on the same cached connection.
         self._client = chromadb.PersistentClient(path=str(Path(path).resolve()))
+
+    @property
+    def client(self) -> chromadb.ClientAPI:
+        """The underlying chromadb client — `Retriever` reuses this to construct its
+        `langchain_chroma.Chroma` wrappers against the exact same connection, rather than a
+        second client pointed at the same path."""
+        return self._client
 
     def get_or_create_collection(self, name: str, metadata: dict | None = None):
         return self._client.get_or_create_collection(name=name, metadata=metadata)
@@ -63,18 +73,3 @@ class ChromaStore:
 
     def count(self, collection: str) -> int:
         return self.get_or_create_collection(collection).count()
-
-    def query(
-        self,
-        collection: str,
-        query_embeddings: list[list[float]],
-        n_results: int,
-        where: dict | None = None,
-        metadata: dict | None = None,
-    ) -> dict:
-        return self.get_or_create_collection(collection, metadata=metadata).query(
-            query_embeddings=query_embeddings,
-            n_results=n_results,
-            where=where,
-            include=["documents", "metadatas", "distances"],
-        )

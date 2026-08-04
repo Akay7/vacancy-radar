@@ -16,12 +16,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+from langchain_core.embeddings import Embeddings
 from pydantic import ValidationError
 
 from vacancy_radar import compat, documents
 from vacancy_radar import manifest as manifest_module
 from vacancy_radar.chroma_store import ChromaStore
-from vacancy_radar.embedder import Embedder, SentenceTransformersEmbedder
+from vacancy_radar.embedder import get_embeddings
 from vacancy_radar.models import VacancyRecord
 
 # Extensions read via documents.extract_text() (specs/006-vacancy-upload) rather than a plain
@@ -175,11 +176,11 @@ def _parse_bullets(cv_dir: Path) -> list[str]:
 def ingest_experience_bullets(
     cv_dir: Path,
     store: ChromaStore | None = None,
-    embedder: Embedder | None = None,
+    embedder: Embeddings | None = None,
 ) -> int:
     """Full-replace the experience_bullets collection from CV_DIR's markdown bullets (FR-012)."""
     store = store or ChromaStore(CHROMA_PATH)
-    embedder = embedder or SentenceTransformersEmbedder()
+    embedder = embedder or get_embeddings()
 
     # Must happen before delete_all()'s own get_or_create_collection() call, which would
     # otherwise create the collection with the default (non-cosine) space first — Chroma
@@ -190,7 +191,7 @@ def ingest_experience_bullets(
     store.delete_all(BULLETS_COLLECTION)
     if bullets:
         ids = [f"bullet-{i}" for i in range(len(bullets))]
-        vectors = embedder.embed(bullets)
+        vectors = embedder.embed_documents(bullets)
         store.upsert(
             BULLETS_COLLECTION,
             ids=ids,
@@ -210,7 +211,7 @@ def _discover_vacancy_folders(vacancy_dir: Path) -> list[Path]:
 def ingest_vacancies(
     vacancy_dir: Path,
     store: ChromaStore | None = None,
-    embedder: Embedder | None = None,
+    embedder: Embeddings | None = None,
     incremental: bool = False,
     ingest_manifest: manifest_module.IngestManifest | None = None,
 ) -> RunSummary:
@@ -221,7 +222,7 @@ def ingest_vacancies(
     manifest (FR-005/FR-010).
     """
     store = store or ChromaStore(CHROMA_PATH)
-    embedder = embedder or SentenceTransformersEmbedder()
+    embedder = embedder or get_embeddings()
     ingest_manifest = ingest_manifest if ingest_manifest is not None else manifest_module.load()
 
     summary = RunSummary()
@@ -269,7 +270,7 @@ def ingest_vacancies(
             )
 
         if to_embed:
-            vectors = embedder.embed([c["document"] for c in to_embed])
+            vectors = embedder.embed_documents([c["document"] for c in to_embed])
             store.upsert(
                 VACANCIES_COLLECTION,
                 ids=[c["id"] for c in to_embed],

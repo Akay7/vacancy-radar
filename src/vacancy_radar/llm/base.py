@@ -1,70 +1,75 @@
-"""LLMProvider interface — Claude and Ollama implementations plug in behind this.
+"""Shared LLM-layer pieces: the domain error type, and a structural type for calling code to
+depend on (specs/010-langchain-integration).
 
-Grounding is not optional, but it isn't this interface's job to enforce it: a provider
-returns its best-effort CandidateReport, and the shared `grounding.enforce()` checkpoint
-(specs/003-analyze-report-generation/research.md) — applied uniformly to every provider's
-output in the /analyze route — is what actually decides which claims survive into the
-response. `similar_vacancies` isn't an LLM input: Report.similar is populated directly from
-retrieval, since a similar-vacancy fact isn't a valid citation source (only a bullet or a
-filter rule is, per Constitution II) and there's nothing for the LLM to ground it in.
+Generation itself goes through LangChain's `BaseChatModel` (`ChatAnthropic`/`ChatOllama`), not a
+hand-rolled ABC with per-vendor request/response code — see `llm/claude.py`/`llm/ollama.py`.
+`LLMProvider` here is a `typing.Protocol` (structural typing only, no `abstractmethod`/`ABC`
+enforcement) purely so `api.py` has a stable type to hang its `Depends(get_llm_provider)`
+annotations on; it is not itself a client and doesn't reimplement anything a chat model does.
 """
 
-from abc import ABC, abstractmethod
+import base64
+from datetime import date as date_type
+from typing import Protocol
+
+from langchain_core.messages import HumanMessage
+from langchain_core.messages.content import create_image_block
+from pydantic import BaseModel
 
 from vacancy_radar.models import CandidateReport, DraftVacancyMetadata
 
 
 class LLMProviderError(Exception):
-    """Raised when the configured LLM backend is unreachable or misconfigured (FR-012)."""
+    """Raised when the configured LLM backend is unreachable, misconfigured, or returns
+    unusable output (FR-012)."""
 
 
-class LLMProvider(ABC):
-    @abstractmethod
+class LLMProvider(Protocol):
     def analyze(
         self,
         jd_text: str,
         experience_bullets: list[tuple[str, str]],
         filter_rules: str,
-    ) -> CandidateReport:
-        """Produce a candidate report for a job description — not yet grounding-validated."""
-        raise NotImplementedError
+    ) -> CandidateReport: ...
 
-    @abstractmethod
     def draft_vacancy_metadata(
         self,
         document_text: str,
         image_bytes: bytes | None = None,
         image_media_type: str | None = None,
-    ) -> DraftVacancyMetadata:
-        """Propose company/position/date from an uploaded vacancy document.
+    ) -> DraftVacancyMetadata: ...
 
-        The maintainer reviews and edits every field before anything is saved
-        (specs/006-vacancy-upload) — this is a best-effort draft, not a validated fact.
+    def extract_document_text(self, image_bytes: bytes, image_media_type: str) -> str: ...
 
-        `image_bytes`/`image_media_type` are set together for image uploads
-        (specs/007-vision-drafting) — `document_text` is always "" in that case, since local
-        OCR has been removed; the image itself is read directly by the LLM. When set, the
-        implementation MUST attempt vision-based drafting and raise `LLMProviderError` on any
-        failure (no vision support, backend error, malformed output) rather than falling back
-        to a text-based attempt — there is no OCR text to fall back to.
-        """
-        raise NotImplementedError
 
-    @abstractmethod
-    def extract_document_text(self, image_bytes: bytes, image_media_type: str) -> str:
-        """Transcribe/summarize an image's job-posting content as plain text.
+class RawDraftVacancyMetadata(BaseModel):
+    """The schema actually requested from the LLM for `draft_vacancy_metadata()` — `date` stays
+    a plain string here, unlike the domain `DraftVacancyMetadata.date: date`, since the model
+    may legitimately return `""` when no date is stated in the document/image; `date` itself
+    can't accept that (a strict `date` type), so this stays a separate structured-output target,
+    finalized via `finalize_draft()` below (preserves specs/006-vacancy-upload's original
+    blank-date-defaults-to-today behavior, which happened before Pydantic validation in the
+    pre-migration code and still must here)."""
 
-        Used only to give the existing text-based retrieval (`retriever.query_bullets()` /
-        `query_similar_vacancies()`) something to embed for image uploads on the Analyze screen
-        (specs/009-analyze-and-log-vacancy) — there is no other source of text for an image, and
-        retrieval fundamentally needs text. Not JSON-structured like `analyze()`/
-        `draft_vacancy_metadata()` — just a plain string, with no fixed shape to validate.
+    company: str
+    position: str
+    date: str
 
-        This is the LLM's own vision capability reading the image directly, the same category of
-        thing `draft_vacancy_metadata()`'s image path already does — not local OCR, and not a
-        reintroduction of what specs/007-vision-drafting removed. The implementation MUST attempt
-        vision directly (no capability-detection call) and raise `LLMProviderError` on any
-        failure (no vision support, backend error, empty/unusable response) — there is no
-        fallback, exactly like the other vision-path methods.
-        """
-        raise NotImplementedError
+
+def finalize_draft(raw: RawDraftVacancyMetadata) -> DraftVacancyMetadata:
+    date_str = raw.date or date_type.today().isoformat()
+    return DraftVacancyMetadata(company=raw.company, position=raw.position, date=date_str)
+
+
+def build_vision_message(prompt: str, image_bytes: bytes, image_media_type: str) -> HumanMessage:
+    """One shared vision-message builder for both providers (specs/010-langchain-integration,
+    research.md #1) — both `ChatAnthropic` and `ChatOllama` translate this exact standardized
+    content-block shape into their own wire format correctly (verified directly against both
+    packages), replacing what used to be two separately hand-built request shapes."""
+    image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+    return HumanMessage(
+        content=[
+            create_image_block(base64=image_b64, mime_type=image_media_type),
+            {"type": "text", "text": prompt},
+        ]
+    )

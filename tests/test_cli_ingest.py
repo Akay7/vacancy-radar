@@ -12,7 +12,7 @@ EXAMPLE_DIR = Path(__file__).parent.parent / "data" / "example"
 
 @pytest.fixture(autouse=True)
 def fake_embedder(monkeypatch):
-    monkeypatch.setattr(ingest, "SentenceTransformersEmbedder", FakeEmbedder)
+    monkeypatch.setattr(ingest, "get_embeddings", FakeEmbedder)
 
 
 @pytest.fixture

@@ -3,24 +3,30 @@
 import hashlib
 import re
 
-from vacancy_radar.embedder import Embedder
+from langchain_core.embeddings import Embeddings
 
 BOW_VECTOR_DIM = 64
 
 
-class FakeEmbedder(Embedder):
-    def embed(self, texts: list[str]) -> list[list[float]]:
+class FakeEmbedder(Embeddings):
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return [[float(len(t) % 7), 0.1, 0.2] for t in texts]
 
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed_documents([text])[0]
 
-class BagOfWordsEmbedder(Embedder):
+
+class BagOfWordsEmbedder(Embeddings):
     """Deterministic bag-of-words embedding — shared vocabulary means shared-word texts
     score a meaningful positive cosine similarity, unrelated texts score near zero. Used
     where a test needs realistic similarity ranking/threshold behavior without a real model.
     """
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return [self._embed_one(t) for t in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed_one(text)
 
     @staticmethod
     def _embed_one(text: str) -> list[float]:

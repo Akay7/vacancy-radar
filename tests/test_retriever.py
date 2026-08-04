@@ -65,6 +65,23 @@ def test_only_posting_chunks_are_compared(populated_store, embedder):
         assert match.similarity < DUPLICATE_SIMILARITY
 
 
+def test_doc_type_filter_is_actually_applied_at_the_query_level(populated_store, embedder):
+    # With the doc_type filter disabled, correspondence content should be directly retrievable
+    # against itself — proving `doc_type` genuinely restricts the vector-store query (FR-008),
+    # not just something that happens to look right from the already-filtered default.
+    correspondence_text = (
+        VACANCIES_DIR / "2026-01-15_acme-corp_backend-engineer" / "correspondence"
+        / "recruiter-email.md"
+    ).read_text()
+    retriever = Retriever(store=populated_store, embedder=embedder)
+
+    filtered = retriever.query_similar_vacancies(correspondence_text, doc_type="posting")
+    unfiltered = retriever.query_similar_vacancies(correspondence_text, doc_type=None)
+
+    assert all(m.similarity < DUPLICATE_SIMILARITY for m in filtered)
+    assert any(m.similarity >= DUPLICATE_SIMILARITY for m in unfiltered)
+
+
 def test_results_ordered_most_to_least_similar(retriever):
     # a JD that's a blend, closer to Acme's wording
     matches = retriever.query_similar_vacancies(ACME_POSTING + " " + GLOBEX_POSTING[:50])

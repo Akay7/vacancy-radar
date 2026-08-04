@@ -1,22 +1,13 @@
-"""Embedder interface — local sentence-transformers by default, hosted is a config swap."""
+"""Local sentence-transformers embeddings, via LangChain's Embeddings interface
+(specs/010-langchain-integration) — no custom Embedder ABC; `langchain_core.embeddings.Embeddings`
+(`embed_documents`/`embed_query`) is the interface calling code (retriever.py, api.py) depends
+on directly, since `Chroma(embedding_function=...)` expects that interface and a bridging
+adapter would just be hand-written glue for a problem `Embeddings` already solves.
+"""
 
-from abc import ABC, abstractmethod
+from langchain_core.embeddings import Embeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 
 
-class Embedder(ABC):
-    @abstractmethod
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        raise NotImplementedError
-
-
-class SentenceTransformersEmbedder(Embedder):
-    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5") -> None:
-        self.model_name = model_name
-        self._model = None  # lazy-loaded in M2
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        if self._model is None:
-            from sentence_transformers import SentenceTransformer
-
-            self._model = SentenceTransformer(self.model_name)
-        return self._model.encode(texts).tolist()
+def get_embeddings(model_name: str = "BAAI/bge-small-en-v1.5") -> Embeddings:
+    return HuggingFaceEmbeddings(model_name=model_name)

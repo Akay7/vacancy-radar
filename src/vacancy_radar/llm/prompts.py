@@ -1,8 +1,11 @@
-"""Shared prompt + JSON schema for /analyze — used by both ClaudeProvider and OllamaProvider.
+"""Shared prompt text for /analyze — used by both ClaudeProvider and OllamaProvider.
 
-One prompt, one schema, so both backends produce the same CandidateReport shape and are
-held to the same grounding rules (Constitution III) before grounding.py's shared validator
-checks their output (Constitution II).
+One prompt, so both backends produce the same CandidateReport shape and are held to the same
+grounding rules (Constitution III) before grounding.py's shared validator checks their output
+(Constitution II). The response shape itself is now enforced by passing the CandidateReport/
+DraftVacancyMetadata Pydantic models directly to `with_structured_output()`
+(specs/010-langchain-integration) rather than a hand-written JSON Schema dict passed alongside
+the prompt.
 """
 
 RUBRIC = """\
@@ -14,44 +17,6 @@ Assess the match across four dimensions:
 
 Based on all four, classify the overall match as exactly one of:
 "strong", "good", "weak", "poor"."""
-
-CANDIDATE_REPORT_JSON_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "match_band": {"type": "string", "enum": ["strong", "good", "weak", "poor"]},
-        "flags": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "label": {"type": "string"},
-                    "severity": {"type": "string", "enum": ["red", "green"]},
-                    "reason": {"type": "string"},
-                    "quote": {"type": "string"},
-                    "source_id": {"type": "string"},
-                },
-                "required": ["label", "severity", "reason", "quote", "source_id"],
-                "additionalProperties": False,
-            },
-        },
-        "gaps": {"type": "array", "items": {"type": "string"}},
-        "draft_sentences": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "quote": {"type": "string"},
-                    "source_id": {"type": "string"},
-                },
-                "required": ["text", "quote", "source_id"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["match_band", "flags", "gaps", "draft_sentences"],
-    "additionalProperties": False,
-}
 
 
 def build_analyze_prompt(
@@ -102,18 +67,6 @@ Respond with ONLY a JSON object matching this shape (no other text):
   "gaps": [str],
   "draft_sentences": [{{"text": str, "quote": str, "source_id": str}}]
 }}"""
-
-
-DRAFT_METADATA_JSON_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "company": {"type": "string"},
-        "position": {"type": "string"},
-        "date": {"type": "string"},
-    },
-    "required": ["company", "position", "date"],
-    "additionalProperties": False,
-}
 
 
 def build_draft_metadata_prompt(document_text: str) -> str:

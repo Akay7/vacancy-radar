@@ -9,13 +9,15 @@ Bumps marked **[reindex]** change the embedding model or the vector-store schema
 
 ### Changed
 - **Breaking:** the JSON API moved under `/api/*` (`/analyze` → `/api/analyze`, `/similar` → `/api/similar`); the browser UI's HTML routes dropped their `/ui/` prefix (`/ui/analyze` → `/analyze`, `/ui/ingest/draft` → `/ingest/draft`, `/ui/ingest/confirm` → `/ingest/confirm`). One rule now holds for the whole app: `/api/*` is the JSON contract, everything else is a page (specs/008-ingest-flow-clarity).
+- LLM provider selection is no longer a separate `LLM_PROVIDER` switch — whichever is configured just runs: `ANTHROPIC_API_KEY` set means Claude, blank means Ollama. Provider config is read from one place (`llm/config.py`, via `pydantic-settings`) instead of being duplicated across call sites.
 
 ### Added
 - Persistent navigation between the paste-a-posting screen and the log-a-vacancy screen — neither page requires already knowing the other's URL, and each page marks which one you're on.
 - Visible step/loading/error states on the log-a-vacancy flow (`data-step="upload"/"review"/"error"/"done"`), so upload/review/confirm no longer look like one unchanged form.
 - A shared stylesheet across both pages, replacing the previously duplicated inline styles.
 - The Analyze screen (`GET /`) now also accepts uploading a document (image/PDF/DOCX/text, same formats as the Log-a-vacancy screen) instead of pasting text: company/position/date are drafted from the same upload and shown alongside the match report, so the vacancy can be logged right there — via the existing, unchanged `POST /ingest/confirm` — without a second visit or re-upload (specs/009-analyze-and-log-vacancy).
-- Startup validation of the configured LLM provider's required configuration (e.g. `ANTHROPIC_API_KEY` when `LLM_PROVIDER=claude`) — the server now refuses to start with a specific message if it's missing, instead of starting normally and failing with an opaque error on the first request.
+- `vacancy-radar ingest`/`sync`/`reindex` output is now plain-language (which `CV_DIR`/`VACANCY_DIR` were scanned, grammatically correct counts) instead of a dense `key=value` line.
+- LLM generation and retrieval now run through LangChain (`ChatAnthropic`/`ChatOllama` for generation, `langchain-chroma`'s `Chroma` for retrieval) instead of hand-rolled per-vendor clients, per the amended constitution (Principle III) — no change to the grounded match-report/drafting behavior itself (verified at parity against the eval harness).
 
 ## [0.1.0] - 2026-08-04
 

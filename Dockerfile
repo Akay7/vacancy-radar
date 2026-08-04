@@ -1,4 +1,6 @@
-FROM python:3.11-slim
+# Fully-qualified image name: Podman/Buildah have no implicit Docker Hub default,
+# so an unqualified `python:...` either prompts for a registry or fails outright.
+FROM docker.io/library/python:3.14-slim
 
 WORKDIR /app
 

@@ -8,6 +8,8 @@ from vacancy_radar import ingest
 from vacancy_radar.api import app, get_llm_provider, get_retriever
 from vacancy_radar.chroma_store import ChromaStore
 from vacancy_radar.llm.base import LLMProvider, LLMProviderError
+from vacancy_radar.llm.claude import ClaudeProvider
+from vacancy_radar.llm.ollama import OllamaProvider
 from vacancy_radar.models import (
     CandidateFlag,
     CandidateReport,
@@ -278,34 +280,20 @@ def test_analyze_similar_field_matches_direct_similar_call(
     assert analyze_response.json()["similar"] == similar_response.json()
 
 
-# --- specs/009-analyze-and-log-vacancy: startup LLM configuration validation --------------
-#
-# These are the only tests in the suite that use `with TestClient(app) as client:` (a context
-# manager) — FastAPI only runs `lifespan` for that form, so every other test file's
-# module-level `client = TestClient(app)` never triggers validate_llm_provider_config() and
-# needs no fake ANTHROPIC_API_KEY.
+# --- LLM provider selection: inferred from ANTHROPIC_API_KEY presence, no separate switch -
 
 
-def test_startup_fails_when_claude_configured_without_api_key(monkeypatch) -> None:
-    monkeypatch.setenv("LLM_PROVIDER", "claude")
+def test_get_llm_provider_returns_claude_when_api_key_present(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
+
+    provider = get_llm_provider()
+
+    assert isinstance(provider, ClaudeProvider)
+
+
+def test_get_llm_provider_returns_ollama_when_no_api_key(monkeypatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
-        with TestClient(app):
-            pass
+    provider = get_llm_provider()
 
-
-def test_startup_succeeds_when_ollama_configured_without_api_key(monkeypatch) -> None:
-    monkeypatch.setenv("LLM_PROVIDER", "ollama")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-
-    with TestClient(app):
-        pass  # no exception — Ollama has no required secret
-
-
-def test_startup_fails_on_invalid_llm_provider_value(monkeypatch) -> None:
-    monkeypatch.setenv("LLM_PROVIDER", "openai")  # not a supported provider
-
-    with pytest.raises(RuntimeError, match="Invalid LLM configuration"):
-        with TestClient(app):
-            pass
+    assert isinstance(provider, OllamaProvider)

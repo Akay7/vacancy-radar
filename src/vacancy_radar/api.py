@@ -13,8 +13,6 @@ import json
 import os
 import shutil
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import NamedTuple
 
@@ -22,12 +20,13 @@ import yaml
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from langchain_core.embeddings import Embeddings
 from pydantic import ValidationError
 
 from vacancy_radar import documents
 from vacancy_radar import ingest as ingest_lib
 from vacancy_radar.chroma_store import ChromaStore
-from vacancy_radar.embedder import Embedder, SentenceTransformersEmbedder
+from vacancy_radar.embedder import get_embeddings
 from vacancy_radar.filter_rules import load_filter_rules
 from vacancy_radar.grounding import enforce
 from vacancy_radar.llm.base import LLMProvider, LLMProviderError
@@ -46,34 +45,7 @@ SUPPORTED_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".png", ".jpg", ".jpeg", ".txt",
 BASE_DIR = Path(__file__).resolve().parent
 
 
-def validate_llm_provider_config() -> None:
-    """Fail fast on missing/invalid configuration for the configured LLM provider
-    (specs/009-analyze-and-log-vacancy) — e.g. `anthropic.Anthropic()` does not validate its API
-    key at construction, so an unset `ANTHROPIC_API_KEY` would otherwise surface as a bare
-    `TypeError` on the first real request instead of the intended `LLMProviderError` path.
-    Ollama needs no equivalent check: `OLLAMA_HOST`/`OLLAMA_MODEL` both have working defaults and
-    there is no secret to be missing.
-    """
-    try:
-        config = LLMConfig()
-    except ValidationError as exc:
-        raise RuntimeError(f"Invalid LLM configuration: {exc}") from exc
-
-    if config.llm_provider == "claude" and not config.anthropic_api_key:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY is not set. It's required when LLM_PROVIDER=claude (the "
-            "default). Set it in your environment or .env, or set LLM_PROVIDER=ollama for a "
-            "fully local/offline setup."
-        )
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    validate_llm_provider_config()
-    yield
-
-
-app = FastAPI(title="Vacancy Radar", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Vacancy Radar", version="0.1.0")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 api_router = APIRouter(prefix="/api")
@@ -83,13 +55,13 @@ def get_chroma_store() -> ChromaStore:
     return ChromaStore(ingest_lib.CHROMA_PATH)
 
 
-def get_embedder() -> Embedder:
-    return SentenceTransformersEmbedder()
+def get_embedder() -> Embeddings:
+    return get_embeddings()
 
 
 def get_retriever(
     store: ChromaStore = Depends(get_chroma_store),
-    embedder: Embedder = Depends(get_embedder),
+    embedder: Embeddings = Depends(get_embedder),
 ) -> Retriever:
     """Composed from get_chroma_store()/get_embedder() so POST /ingest/confirm can write to
     (and /api/similar, /api/analyze read from) the exact same store — overriding just those two
@@ -103,10 +75,12 @@ def get_vacancy_dir() -> Path:
 
 
 def get_llm_provider() -> LLMProvider:
+    """Which provider runs is inferred from configuration, not a separate selector
+    (llm/config.py) — Claude if an API key is set, Ollama otherwise."""
     config = LLMConfig()
-    if config.llm_provider == "ollama":
-        return OllamaProvider(model=config.ollama_model, host=config.ollama_host)
-    return ClaudeProvider()
+    if config.anthropic_api_key:
+        return ClaudeProvider()
+    return OllamaProvider(model=config.ollama_model, host=config.ollama_host)
 
 
 @app.get("/healthz")
@@ -186,8 +160,8 @@ def ui_analyze(
                 report = run_analysis(query_text, retriever, llm_provider)
             except (LLMProviderError, ValidationError, json.JSONDecodeError):
                 report_message = (
-                    "The analysis backend is unavailable right now. Check your LLM_PROVIDER "
-                    "configuration and try again."
+                    "The analysis backend is unavailable right now. Check your ANTHROPIC_API_KEY "
+                    "or Ollama configuration and try again."
                 )
 
         return templates.TemplateResponse(
@@ -212,8 +186,8 @@ def ui_analyze(
         report = run_analysis(jd_text, retriever, llm_provider)
     except (LLMProviderError, ValidationError, json.JSONDecodeError):
         message = (
-            "The analysis backend is unavailable right now. Check your LLM_PROVIDER "
-            "configuration and try again."
+            "The analysis backend is unavailable right now. Check your ANTHROPIC_API_KEY "
+            "or Ollama configuration and try again."
         )
         return templates.TemplateResponse(request, "_error.html", {"message": message})
 
@@ -363,7 +337,7 @@ def ingest_confirm(
     outcome: str = Form(""),
     vacancy_dir: Path = Depends(get_vacancy_dir),
     store: ChromaStore = Depends(get_chroma_store),
-    embedder: Embedder = Depends(get_embedder),
+    embedder: Embeddings = Depends(get_embedder),
 ):
     def result(message: str, success: bool):
         return templates.TemplateResponse(
