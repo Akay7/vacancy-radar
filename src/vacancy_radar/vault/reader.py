@@ -6,6 +6,7 @@ Every file-level failure becomes a `VaultWarning` instead, so one
 hand-edited file with broken YAML never takes an entire read down.
 """
 
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from types import MappingProxyType
@@ -55,6 +56,8 @@ class VaultSnapshot(BaseModel):
     documents: MappingProxyType[str, Document]
     companies: MappingProxyType[str, Company]
     hashes: MappingProxyType[Path, str]
+    vacancy_paths: MappingProxyType[str, Path]
+    document_paths: MappingProxyType[str, Path]
     warnings: tuple[VaultWarning, ...] = ()
 
     def documents_for(self, vacancy_id: str) -> list[Document]:
@@ -76,6 +79,18 @@ class VaultSnapshot(BaseModel):
         return vacancy.applied_date or vacancy.found_date
 
 
+@dataclass
+class _Documents:
+    """Documents collected so far, alongside each one's file path."""
+
+    by_id: dict[str, Document] = field(default_factory=dict)
+    paths: dict[str, Path] = field(default_factory=dict)
+
+    def add(self, document: Document, path: Path) -> None:
+        self.by_id[document.id] = document
+        self.paths[document.id] = path
+
+
 def read_vault(vault: Path) -> VaultSnapshot:
     """Traverse `vault` and return an immutable `VaultSnapshot`.
 
@@ -85,7 +100,7 @@ def read_vault(vault: Path) -> VaultSnapshot:
     hashes = _hash_all_files(vault)
 
     companies: dict[str, Company] = {}
-    documents: dict[str, Document] = {}
+    documents = _Documents()
     warnings: list[VaultWarning] = []
     pending_vacancies: list[tuple[Path, Vacancy]] = []
 
@@ -100,14 +115,16 @@ def read_vault(vault: Path) -> VaultSnapshot:
                 vault, vacancy_path, warnings, pending_vacancies, documents
             )
 
-    vacancies = _resolve_duplicates(pending_vacancies, warnings)
+    vacancies, vacancy_paths = _resolve_duplicates(pending_vacancies, warnings)
     _warn_missing_companies(vacancies, companies, warnings)
 
     return VaultSnapshot(
         vacancies=MappingProxyType(vacancies),
-        documents=MappingProxyType(documents),
+        documents=MappingProxyType(documents.by_id),
         companies=MappingProxyType(companies),
         hashes=MappingProxyType(hashes),
+        vacancy_paths=MappingProxyType(vacancy_paths),
+        document_paths=MappingProxyType(documents.paths),
         warnings=tuple(warnings),
     )
 
@@ -127,7 +144,7 @@ def _read_vacancy_dir(
     vacancy_path: Path,
     warnings: list[VaultWarning],
     pending_vacancies: list[tuple[Path, Vacancy]],
-    documents: dict[str, Document],
+    documents: _Documents,
 ) -> None:
     vacancy_md = vacancy_path / VACANCY_FILENAME
     docs_dir = vacancy_path / DOCUMENTS_DIRNAME
@@ -158,7 +175,7 @@ def _read_vacancy_dir(
     for doc_path in doc_paths:
         document = _read_document(doc_path, vacancy, warnings)
         if document is not None:
-            documents[document.id] = document
+            documents.add(document, doc_path)
 
 
 def _warn_missing_companies(
@@ -260,9 +277,11 @@ def _read_document(
         # A real take-home is often a PDF or a zip, not a note - register
         # it by path, with no frontmatter to parse and no reliable
         # metadata source, so kind/title/date fall back to plausible
-        # defaults derived from the file and its owning vacancy.
+        # defaults derived from the file and its owning vacancy. The id
+        # is the full filename, not the stem: two sources differing only
+        # by extension (notes.pdf, notes.docx) must not collide.
         return Document(
-            id=doc_path.stem,
+            id=doc_path.name,
             vacancy_id=vacancy.id,
             kind=DocumentKind.TAKEHOME,
             title=doc_path.name,
@@ -287,6 +306,11 @@ def _read_document(
             )
         )
         return None
+
+    if "extracted_from" in metadata:
+        _check_sidecar(doc_path, metadata, warnings)
+        return None
+
     try:
         return Document(**metadata)
     except ValidationError as exc:
@@ -300,24 +324,62 @@ def _read_document(
         return None
 
 
+def _check_sidecar(
+    sidecar_path: Path, metadata: object, warnings: list[VaultWarning]
+) -> None:
+    """A `.md` file whose frontmatter has `extracted_from` is a
+    sidecar, not a `Document` - it shadows the source it names rather
+    than contributing a row of its own. Warn (and stay excluded from
+    `documents`) if that source doesn't match or doesn't exist."""
+    extracted_from = str(metadata["extracted_from"])  # type: ignore[index]
+    own_source_name = sidecar_path.stem  # "spec.pdf.md" -> "spec.pdf"
+
+    if extracted_from != own_source_name:
+        warnings.append(
+            VaultWarning(
+                kind="mismatched_sidecar",
+                message=(
+                    f"{sidecar_path}: extracted_from {extracted_from!r} "
+                    f"does not match its own filename {own_source_name!r}"
+                ),
+                paths=(sidecar_path,),
+            )
+        )
+        return
+
+    if not (sidecar_path.parent / extracted_from).is_file():
+        warnings.append(
+            VaultWarning(
+                kind="orphan_sidecar",
+                message=f"{sidecar_path}: source {extracted_from!r} does not exist",
+                paths=(sidecar_path,),
+            )
+        )
+
+
 def _resolve_duplicates(
     pending: list[tuple[Path, Vacancy]], warnings: list[VaultWarning]
-) -> dict[str, Vacancy]:
+) -> tuple[dict[str, Vacancy], dict[str, Path]]:
     """Keep one vacancy per id, deterministically, warning on the rest.
 
     When two paths parse to the same id, the path that sorts first
     (lexically, as a string) survives - independent of directory-entry
     iteration order, which isn't guaranteed stable across platforms.
+
+    Returns the surviving vacancies and, alongside, each survivor's
+    `vacancy.md` path.
     """
     by_id: dict[str, list[tuple[Path, Vacancy]]] = {}
     for path, vacancy in pending:
         by_id.setdefault(vacancy.id, []).append((path, vacancy))
 
     survivors: dict[str, Vacancy] = {}
+    survivor_paths: dict[str, Path] = {}
     for vacancy_id, entries in by_id.items():
         entries_sorted = sorted(entries, key=lambda entry: str(entry[0]))
         survivor_path, survivor = entries_sorted[0]
         survivors[vacancy_id] = survivor
+        survivor_paths[vacancy_id] = survivor_path / VACANCY_FILENAME
         if len(entries_sorted) > 1:
             warnings.append(
                 VaultWarning(
@@ -329,4 +391,4 @@ def _resolve_duplicates(
                     paths=tuple(path for path, _ in entries_sorted),
                 )
             )
-    return survivors
+    return survivors, survivor_paths

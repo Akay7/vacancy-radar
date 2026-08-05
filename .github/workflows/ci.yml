@@ -19,6 +19,16 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-groups
 
+      - name: Cache embedding models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          # Keyed by the fastembed model name(s) this project uses, so a
+          # model change busts the cache instead of silently reusing a
+          # stale download; the network fetch then happens once per model
+          # version, not once per test run.
+          key: huggingface-BAAI-bge-small-en-v1.5
+
       - name: Pre-commit hooks
         run: uv run pre-commit run --all-files
 

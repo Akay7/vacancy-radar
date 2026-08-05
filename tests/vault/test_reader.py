@@ -72,6 +72,29 @@ def _simple_vacancy(
     return Vacancy(**fields)  # type: ignore[arg-type]
 
 
+def _write_sidecar(
+    docs_dir: Path,
+    source_name: str,
+    *,
+    extracted_from: str | None = None,
+    body: str = "Extracted text from the source.",
+) -> Path:
+    """Write a sidecar for `source_name` (default: correctly matching
+    it) into `docs_dir`. Pass `extracted_from` to build a mismatched
+    sidecar."""
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "extracted_from": extracted_from if extracted_from is not None else source_name,
+        "source_hash": "sha256:deadbeef",
+        "extractor": "pypdf-6.14.2",
+        "extracted_at": "2026-01-01",
+        "manually_corrected": False,
+    }
+    sidecar_path = docs_dir / f"{source_name}.md"
+    sidecar_path.write_text(frontmatter.serialize(metadata, body), encoding="utf-8")
+    return sidecar_path
+
+
 # --- Section 5: traversal and counts -----------------------------------
 
 
@@ -151,8 +174,8 @@ def test_non_markdown_document_is_registered_without_frontmatter_parsing(
 
     snapshot = read_vault(vault)
 
-    assert "assignment" in snapshot.documents
-    assert snapshot.documents["assignment"].vacancy_id == "v1"
+    assert "assignment.pdf" in snapshot.documents
+    assert snapshot.documents["assignment.pdf"].vacancy_id == "v1"
     assert not any(
         "assignment.pdf" in str(path)
         for warning in snapshot.warnings
@@ -514,3 +537,181 @@ def test_large_vault_hashes_each_file_exactly_once(
     assert call_counts
     assert all(count == 1 for count in call_counts.values())
     assert set(call_counts) == set(snapshot.hashes)
+
+
+# --- Sidecar recognition (index-build stage) ------------------------------
+
+
+def test_source_with_matching_sidecar_registers_as_one_document_no_warning(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "acme", "Acme")
+    vacancy_dir = _write_vacancy(vault, "acme", "v1", _simple_vacancy("v1"))
+    docs_dir = vacancy_dir / "documents"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "spec.pdf").write_bytes(b"%PDF fake source bytes")
+    _write_sidecar(docs_dir, "spec.pdf")
+
+    snapshot = read_vault(vault)
+
+    assert "spec.pdf" in snapshot.documents
+    assert "spec.pdf.md" not in snapshot.documents
+    assert snapshot.warnings == ()
+
+
+def test_sidecar_frontmatter_never_reaches_document_validation(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "acme", "Acme")
+    vacancy_dir = _write_vacancy(vault, "acme", "v1", _simple_vacancy("v1"))
+    docs_dir = vacancy_dir / "documents"
+    (docs_dir / "spec.pdf").parent.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "spec.pdf").write_bytes(b"%PDF fake source bytes")
+    _write_sidecar(docs_dir, "spec.pdf")
+
+    snapshot = read_vault(vault)
+
+    assert not any(w.kind == "invalid_document" for w in snapshot.warnings)
+
+
+def test_orphaned_sidecar_produces_a_warning_and_is_excluded(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "acme", "Acme")
+    vacancy_dir = _write_vacancy(vault, "acme", "v1", _simple_vacancy("v1"))
+    docs_dir = vacancy_dir / "documents"
+    # No spec.pdf source present - the sidecar is orphaned.
+    _write_sidecar(docs_dir, "spec.pdf")
+
+    snapshot = read_vault(vault)
+
+    assert any(
+        w.kind == "orphan_sidecar" and any("spec.pdf.md" in str(p) for p in w.paths)
+        for w in snapshot.warnings
+    )
+    assert not any(
+        "spec.pdf.md" in doc.id or "spec.pdf.md" in doc.title
+        for doc in snapshot.documents.values()
+    )
+
+
+def test_mismatched_sidecar_produces_a_warning_and_is_excluded(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "acme", "Acme")
+    vacancy_dir = _write_vacancy(vault, "acme", "v1", _simple_vacancy("v1"))
+    docs_dir = vacancy_dir / "documents"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "spec.pdf").write_bytes(b"%PDF fake source bytes")
+    (docs_dir / "other.pdf").write_bytes(b"%PDF another fake source")
+    _write_sidecar(docs_dir, "spec.pdf", extracted_from="other.pdf")
+
+    snapshot = read_vault(vault)
+
+    assert any(
+        w.kind == "mismatched_sidecar" and any("spec.pdf.md" in str(p) for p in w.paths)
+        for w in snapshot.warnings
+    )
+
+
+def test_same_stem_sources_get_independent_sidecars(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "acme", "Acme")
+    vacancy_dir = _write_vacancy(vault, "acme", "v1", _simple_vacancy("v1"))
+    docs_dir = vacancy_dir / "documents"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "notes.pdf").write_bytes(b"%PDF fake pdf source")
+    (docs_dir / "notes.docx").write_bytes(b"fake docx source bytes")
+    _write_sidecar(docs_dir, "notes.pdf")
+    _write_sidecar(docs_dir, "notes.docx")
+
+    snapshot = read_vault(vault)
+
+    assert "notes.pdf" in snapshot.documents
+    assert "notes.docx" in snapshot.documents
+    assert snapshot.warnings == ()
+
+
+def test_ordinary_document_without_extracted_from_is_unaffected(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "acme", "Acme")
+    vacancy_dir = _write_vacancy(vault, "acme", "v1", _simple_vacancy("v1"))
+    _write_document(
+        vacancy_dir,
+        Document(
+            id="v1-doc1",
+            vacancy_id="v1",
+            kind=DocumentKind.NOTE,
+            title="Note",
+            date=date(2026, 1, 2),
+        ),
+    )
+
+    snapshot = read_vault(vault)
+
+    assert "v1-doc1" in snapshot.documents
+    assert snapshot.warnings == ()
+
+
+# --- Path lookups (index-build stage) --------------------------------------
+
+
+def test_document_paths_maps_document_id_to_its_actual_file_path(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "acme", "Acme")
+    vacancy_dir = _write_vacancy(vault, "acme", "v1", _simple_vacancy("v1"))
+    _write_document(
+        vacancy_dir,
+        Document(
+            id="v1-doc1",
+            vacancy_id="v1",
+            kind=DocumentKind.NOTE,
+            title="Note",
+            date=date(2026, 1, 2),
+        ),
+    )
+
+    snapshot = read_vault(vault)
+
+    assert (
+        snapshot.document_paths["v1-doc1"] == vacancy_dir / "documents" / "v1-doc1.md"
+    )
+
+
+def test_vacancy_paths_maps_vacancy_id_to_its_vacancy_md_path(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "acme", "Acme")
+    vacancy = _simple_vacancy("the-real-id")
+    vacancy_dir = _write_vacancy(vault, "acme", "some-dirname", vacancy)
+
+    snapshot = read_vault(vault)
+
+    assert snapshot.vacancy_paths["the-real-id"] == vacancy_dir / "vacancy.md"
+
+
+def test_path_mappings_are_immutable(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "acme", "Acme")
+    _write_vacancy(vault, "acme", "v1", _simple_vacancy("v1"))
+
+    snapshot = read_vault(vault)
+
+    with pytest.raises(TypeError):
+        snapshot.document_paths["new"] = Path("/nonexistent")
+    with pytest.raises(TypeError):
+        snapshot.vacancy_paths["new"] = Path("/nonexistent")

@@ -5,6 +5,7 @@ from vacancy_radar.vault.paths import (
     documents_dir,
     is_within,
     iter_vault_dirs,
+    sidecar_path_for,
     vacancy_markdown_path,
 )
 
@@ -73,3 +74,20 @@ def test_symlink_loop_terminates(tmp_path: Path) -> None:
 
     assert vault in visited
     assert child in visited
+
+
+def test_sidecar_path_for_appends_md_to_the_full_filename() -> None:
+    source = Path("/vault/acme/v1/documents/spec.pdf")
+
+    assert sidecar_path_for(source) == Path("/vault/acme/v1/documents/spec.pdf.md")
+
+
+def test_sidecar_path_for_distinct_sources_sharing_a_stem() -> None:
+    docs_dir = Path("/vault/acme/v1/documents")
+
+    pdf_sidecar = sidecar_path_for(docs_dir / "notes.pdf")
+    docx_sidecar = sidecar_path_for(docs_dir / "notes.docx")
+
+    assert pdf_sidecar == docs_dir / "notes.pdf.md"
+    assert docx_sidecar == docs_dir / "notes.docx.md"
+    assert pdf_sidecar != docx_sidecar

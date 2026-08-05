@@ -56,6 +56,17 @@ def documents_dir(vault: Path, company_slug: str, vacancy_dirname: str) -> Path:
     return vacancy_dir(vault, company_slug, vacancy_dirname) / DOCUMENTS_DIRNAME
 
 
+def sidecar_path_for(source_path: Path) -> Path:
+    """The path of the sidecar that would shadow `source_path`.
+
+    The sidecar's name is the source's full filename (extension
+    included) plus `.md` - not the stem - so two sources differing
+    only by extension (`notes.pdf`, `notes.docx`) get independent
+    sidecars instead of colliding on one `notes.md`.
+    """
+    return source_path.with_name(source_path.name + ".md")
+
+
 def is_skipped_name(name: str) -> bool:
     """True for dotfiles and internal directories traversal must ignore.
 
