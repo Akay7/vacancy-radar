@@ -35,7 +35,7 @@
 - [x] 5.1 Confirm scenarios in `specs/dev-workflow/spec.md` hold:
       a lint violation and a malformed YAML file each block a local
       commit once hooks are installed.
-- [ ] 5.2 Open a throwaway PR (or push to a branch) to confirm the
+- [x] 5.2 Open a throwaway PR (or push to a branch) to confirm the
       updated CI `test` job runs `pre-commit run --all-files` followed
       by `pytest`, with no leftover standalone `ruff check`/
       `ruff format --check` steps.
