@@ -61,4 +61,58 @@ address.
   inspected
 - **THEN** none of them matches a real company, person, or address —
   all content is drawn from the generator's synthetic data
-</content>
+
+### Requirement: Fixture generation supports a broken mode for resilience fixtures
+`tests/fixtures/generate.py` SHALL support a `--broken` mode that
+writes, alongside a valid vault, the malformed cases vault-reader's
+resilience tests need: a `vacancy.md` with unparseable YAML, a
+`vacancy.md` with an unknown status, an unreadable file, two
+`vacancy.md` files sharing the same id, and a `documents/` directory
+with no `vacancy.md`. Running `--broken` SHALL NOT alter the healthy
+fixture tree's existing files.
+
+#### Scenario: --broken mode adds malformed fixtures without altering the healthy tree
+- **GIVEN** the fixture generator run in `--broken` mode
+- **WHEN** its output is compared to the same generator run without
+  `--broken`
+- **THEN** every file present in the non-broken run is present,
+  unchanged, in the `--broken` run
+- **THEN** the `--broken` run additionally contains the malformed-YAML,
+  unknown-status, unreadable-file, duplicate-id, and orphan-directory
+  cases
+
+### Requirement: The healthy fixture tree contains a vault marker
+The generated vault SHALL include a `.vacancy-radar/` marker directory
+at its root.
+
+#### Scenario: the generated vault has a .vacancy-radar marker directory
+- **GIVEN** a fixture vault generated with a fixed seed
+- **WHEN** its root directory is inspected
+- **THEN** a `.vacancy-radar/` directory is present at the root
+
+### Requirement: The healthy fixture tree includes a non-markdown document
+The generated vault SHALL include at least one `takehome`-kind document
+stored as a non-markdown file (not `.md`, no frontmatter), instead of
+as a parsed frontmatter file.
+
+#### Scenario: at least one takehome document is a non-markdown file
+- **GIVEN** a fixture vault generated with a fixed seed
+- **WHEN** the documents in it are inspected
+- **THEN** at least one `documents/` directory contains a non-markdown
+  file standing in for a take-home document
+
+### Requirement: Fixture generation supports a scale override for performance tests
+`generate_vault` SHALL accept optional company-count-range overrides.
+When omitted, generation SHALL use the same bounds as before (so the
+committed, documented-seed fixture is unaffected). When provided, they
+SHALL be used to generate a larger vault (e.g. for a ~700-vacancy
+performance test) without writing to the committed fixture path.
+
+#### Scenario: a scale override produces a larger vault without touching the committed fixture
+- **GIVEN** `generate_vault` called with company-count-range overrides
+  sized to produce roughly 700 vacancies, targeting a temporary output
+  directory
+- **WHEN** generation completes
+- **THEN** the temporary output directory contains roughly 700
+  vacancies
+- **THEN** the committed `tests/fixtures/vault/` tree is unchanged

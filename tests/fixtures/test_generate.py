@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,9 @@ from generate import (
     LAST_NAMES,
     REQUIRED_UNKNOWN_ROLE_COUNT,
     SYNTHETIC_COMPANY_NAMES,
+    VAULT_MARKER_DIRNAME,
     generate_vault,
+    write_broken_fixtures,
 )
 
 from vacancy_radar.frontmatter import parse
@@ -125,3 +128,127 @@ def test_generated_content_is_drawn_only_from_synthetic_pools(
             assert any(phrase in body for phrase in EMAIL_MARKER_PHRASES)
 
     assert vacancies  # sanity: the loop above ran against real data
+
+
+def test_generated_vault_has_marker_directory(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    vault = _generate(tmp_path_factory, "marker")
+
+    assert (vault / VAULT_MARKER_DIRNAME).is_dir()
+
+
+def test_at_least_one_takehome_document_is_non_markdown(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    vault = _generate(tmp_path_factory, "non-markdown-takehome")
+
+    non_markdown_files = [p for p in vault.glob("*/*/documents/*") if p.suffix != ".md"]
+    assert non_markdown_files
+
+    for path in non_markdown_files:
+        # It must not be parseable as frontmatter - no leading delimiter.
+        assert not path.read_bytes().startswith(b"---\n")
+
+
+def test_scale_override_produces_a_larger_vault(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    default_vault = _generate(tmp_path_factory, "default-scale")
+    default_vacancies = _load_vacancies(default_vault)
+
+    scaled_output = tmp_path_factory.mktemp("large-scale")
+    generate_vault(scaled_output, seed=SEED, min_companies=60, max_companies=60)
+    scaled_vacancies = _load_vacancies(scaled_output)
+
+    assert len(scaled_vacancies) > len(default_vacancies)
+
+
+def test_scale_override_does_not_touch_committed_fixture(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    committed_vault = Path(__file__).parent / "vault"
+    before = {
+        rel: (committed_vault / rel).read_bytes()
+        for rel in (
+            p.relative_to(committed_vault)
+            for p in committed_vault.rglob("*")
+            if p.is_file()
+        )
+    }
+
+    scaled_output = tmp_path_factory.mktemp("scale-no-touch")
+    generate_vault(scaled_output, seed=SEED, min_companies=30, max_companies=30)
+
+    after = {
+        rel: (committed_vault / rel).read_bytes()
+        for rel in (
+            p.relative_to(committed_vault)
+            for p in committed_vault.rglob("*")
+            if p.is_file()
+        )
+    }
+    assert before == after
+
+
+def test_broken_mode_preserves_healthy_tree_files(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    healthy_only = _generate(tmp_path_factory, "healthy-only")
+
+    healthy_plus_broken = tmp_path_factory.mktemp("healthy-plus-broken")
+    generate_vault(healthy_plus_broken, seed=SEED)
+    write_broken_fixtures(healthy_plus_broken)
+
+    healthy_files = sorted(
+        p.relative_to(healthy_only) for p in healthy_only.rglob("*") if p.is_file()
+    )
+    for rel in healthy_files:
+        assert (healthy_plus_broken / rel).read_bytes() == (
+            healthy_only / rel
+        ).read_bytes()
+
+
+MIN_DUPLICATE_ID_PATHS = 2
+
+
+def test_broken_mode_adds_malformed_fixtures(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    vault = tmp_path_factory.mktemp("broken")
+    generate_vault(vault, seed=SEED)
+    write_broken_fixtures(vault)
+
+    known_statuses = {s.value for s in Status}
+    unparseable: list[Path] = []
+    unknown_status_found = False
+    duplicate_ids: dict[str, list[Path]] = {}
+
+    for path in vault.glob("*/*/vacancy.md"):
+        if not os.access(path, os.R_OK):
+            continue
+        try:
+            metadata, _ = parse(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - any parse failure counts here
+            unparseable.append(path)
+            continue
+        status = metadata.get("status")
+        if status is not None and status not in known_statuses:
+            unknown_status_found = True
+        vacancy_id = metadata.get("id")
+        if vacancy_id:
+            duplicate_ids.setdefault(vacancy_id, []).append(path)
+
+    assert unparseable
+    assert unknown_status_found
+    assert any(len(paths) >= MIN_DUPLICATE_ID_PATHS for paths in duplicate_ids.values())
+
+    unreadable = [p for p in vault.glob("*/*/vacancy.md") if not os.access(p, os.R_OK)]
+    assert unreadable
+    for path in unreadable:
+        path.chmod(0o644)  # restore so pytest's tmp_path cleanup can remove it
+
+    orphan_dirs = [
+        p for p in vault.glob("*/*/documents") if not (p.parent / "vacancy.md").exists()
+    ]
+    assert orphan_dirs

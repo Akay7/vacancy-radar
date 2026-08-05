@@ -139,6 +139,9 @@ NON_EMAIL_BODIES = {
     DocumentKind.TAKEHOME: "Take-home assignment instructions for the {role} role.",
 }
 
+VAULT_MARKER_DIRNAME = ".vacancy-radar"
+"""The vault marker directory `config.resolve_vault_path` looks for."""
+
 MIN_COMPANIES = 12
 MAX_COMPANIES = 20
 MIN_VACANCIES_PER_COMPANY = 1
@@ -179,12 +182,45 @@ def _document_title(kind: DocumentKind, role: str, company_name: str) -> str:
     return f"{kind.value.replace('_', ' ').title()}: {role} at {company_name}"
 
 
-def generate_vault(output_dir: Path, seed: int) -> None:
-    """Generate a deterministic synthetic vault at `output_dir`."""
+def _company_names(rng: random.Random, count: int) -> list[str]:
+    """Return `count` distinct company display names.
+
+    Draws from `SYNTHETIC_COMPANY_NAMES` without replacement. When
+    `count` exceeds the pool (only relevant for scale-testing, since
+    the default `MIN_COMPANIES`/`MAX_COMPANIES` bounds never exceed
+    it), extends it with numbered variants (`"Acme Corp 2"`, `"Acme
+    Corp 3"`, ...) so names stay distinct and slugs stay unique.
+    """
+    pool = SYNTHETIC_COMPANY_NAMES
+    if count <= len(pool):
+        return rng.sample(pool, count)
+
+    names = list(pool)
+    rng.shuffle(names)
+    for i in range(count - len(pool)):
+        base = pool[i % len(pool)]
+        names.append(f"{base} {i // len(pool) + 2}")
+    return names
+
+
+def generate_vault(
+    output_dir: Path,
+    seed: int,
+    *,
+    min_companies: int = MIN_COMPANIES,
+    max_companies: int = MAX_COMPANIES,
+) -> None:
+    """Generate a deterministic synthetic vault at `output_dir`.
+
+    `min_companies`/`max_companies` default to the module constants
+    used by the committed fixture; a caller (e.g. a performance test)
+    may override them to generate a larger vault without touching the
+    committed fixture's seed or size.
+    """
     rng = random.Random(seed)
 
-    company_count = rng.randint(MIN_COMPANIES, MAX_COMPANIES)
-    chosen_names = rng.sample(SYNTHETIC_COMPANY_NAMES, company_count)
+    company_count = rng.randint(min_companies, max_companies)
+    chosen_names = _company_names(rng, company_count)
 
     vacancy_counts = [
         rng.randint(MIN_VACANCIES_PER_COMPANY, MAX_VACANCIES_PER_COMPANY)
@@ -273,6 +309,13 @@ def generate_vault(output_dir: Path, seed: int) -> None:
         documents = []
         for doc_index in range(doc_count):
             kind = rng.choice(list(DocumentKind))
+            # The very first document of the very first vacancy is always
+            # forced to a take-home, written as a non-markdown file (see
+            # _write_vault) - guarantees the non-markdown-document scenario
+            # has a fixture regardless of how the random draws land.
+            is_forced_non_markdown_takehome = position == 0 and doc_index == 0
+            if is_forced_non_markdown_takehome:
+                kind = DocumentKind.TAKEHOME
             doc_date = found_date + timedelta(days=rng.randint(0, 30))
             doc_id = f"{vacancy_id}-doc{doc_index + 1}"
             documents.append(
@@ -290,6 +333,7 @@ def generate_vault(output_dir: Path, seed: int) -> None:
                     "body": _document_body(
                         kind, role, str(company["name"]), recruiter, rng
                     ),
+                    "non_markdown": is_forced_non_markdown_takehome,
                 }
             )
 
@@ -306,6 +350,7 @@ def _write_vault(
     vacancy_records: list[dict[str, object]],
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / VAULT_MARKER_DIRNAME).mkdir(parents=True, exist_ok=True)
 
     for info in companies.values():
         company_dir = output_dir / str(info["slug"])
@@ -339,6 +384,14 @@ def _write_vault(
         docs_dir.mkdir(parents=True, exist_ok=True)
         for doc_record in record["documents"]:  # type: ignore[union-attr]
             document: Document = doc_record["document"]
+            if doc_record.get("non_markdown"):
+                # A real take-home is often a PDF, not a note - stand in
+                # with a non-markdown file, registered by path only, no
+                # frontmatter to parse.
+                (docs_dir / f"{document.id}.pdf").write_bytes(
+                    doc_record["body"].encode("utf-8")
+                )
+                continue
             doc_metadata = document.model_dump(mode="json", exclude_none=True)
             (docs_dir / f"{document.id}.md").write_text(
                 frontmatter.serialize(doc_metadata, doc_record["body"]),
@@ -346,12 +399,151 @@ def _write_vault(
             )
 
 
+def _write_broken_company(vault_dir: Path, slug: str, name: str) -> Path:
+    company_dir = vault_dir / slug
+    company_dir.mkdir(parents=True, exist_ok=True)
+    company = Company(slug=slug, name=name, domains=[f"{slug}.example"])
+    metadata = company.model_dump(mode="json", exclude_none=True)
+    (company_dir / "_company.md").write_text(
+        frontmatter.serialize(metadata, ""), encoding="utf-8"
+    )
+    return company_dir
+
+
+def _write_malformed_yaml_vacancy(vault_dir: Path) -> None:
+    """A vacancy.md whose frontmatter is not parseable YAML."""
+    slug = "broken-yaml-vault-corp"
+    company_dir = _write_broken_company(vault_dir, slug, "Broken Yaml Vault Corp")
+    vacancy_dir = company_dir / "broken-yaml-vacancy"
+    vacancy_dir.mkdir(parents=True, exist_ok=True)
+    (vacancy_dir / "vacancy.md").write_text(
+        "---\n"
+        "id: broken-yaml-vacancy\n"
+        "company: Broken Yaml Vault Corp\n"
+        "  bad_indent: [unterminated\n"
+        "---\n"
+        "# Malformed frontmatter, on purpose\n",
+        encoding="utf-8",
+    )
+
+
+def _write_unknown_status_vacancy(vault_dir: Path) -> None:
+    """A vacancy.md whose status is not one of the defined Status values."""
+    slug = "unknown-status-vault-corp"
+    company_dir = _write_broken_company(vault_dir, slug, "Unknown Status Vault Corp")
+    vacancy_dir = company_dir / "unknown-status-vacancy"
+    vacancy_dir.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "id": "unknown-status-vacancy",
+        "company": "Unknown Status Vault Corp",
+        "company_slug": slug,
+        "role": "Backend Engineer",
+        "source_url": f"https://jobs.{slug}.example/postings/1",
+        "status": "not_a_real_status",
+        "found_date": "2026-01-01",
+    }
+    (vacancy_dir / "vacancy.md").write_text(
+        frontmatter.serialize(metadata, "# Backend Engineer\n"), encoding="utf-8"
+    )
+
+
+def _write_unreadable_vacancy(vault_dir: Path) -> None:
+    """A vacancy.md whose permissions make it unreadable."""
+    slug = "unreadable-vault-corp"
+    company_dir = _write_broken_company(vault_dir, slug, "Unreadable Vault Corp")
+    vacancy_dir = company_dir / "unreadable-vacancy"
+    vacancy_dir.mkdir(parents=True, exist_ok=True)
+    vacancy = Vacancy(
+        id="unreadable-vacancy",
+        company="Unreadable Vault Corp",
+        company_slug=slug,
+        role="Backend Engineer",
+        source_url=f"https://jobs.{slug}.example/postings/1",
+        status=Status.FOUND,
+        found_date=date(2026, 1, 1),
+    )
+    metadata = vacancy.model_dump(
+        mode="json", exclude={"role_is_placeholder"}, exclude_none=True
+    )
+    vacancy_path = vacancy_dir / "vacancy.md"
+    vacancy_path.write_text(
+        frontmatter.serialize(metadata, "# Backend Engineer\n"), encoding="utf-8"
+    )
+    vacancy_path.chmod(0o000)
+
+
+def _write_duplicate_id_vacancies(vault_dir: Path) -> None:
+    """Two vacancy.md files, in different directories, sharing one id."""
+    slug = "duplicate-id-vault-corp"
+    company_dir = _write_broken_company(vault_dir, slug, "Duplicate Id Vault Corp")
+    shared_id = "duplicate-vacancy-id"
+    for suffix, role in (("a", "Backend Engineer"), ("b", "Frontend Developer")):
+        vacancy_dir = company_dir / f"duplicate-vacancy-{suffix}"
+        vacancy_dir.mkdir(parents=True, exist_ok=True)
+        vacancy = Vacancy(
+            id=shared_id,
+            company="Duplicate Id Vault Corp",
+            company_slug=slug,
+            role=role,
+            source_url=f"https://jobs.{slug}.example/postings/{suffix}",
+            status=Status.FOUND,
+            found_date=date(2026, 1, 1),
+        )
+        metadata = vacancy.model_dump(
+            mode="json", exclude={"role_is_placeholder"}, exclude_none=True
+        )
+        (vacancy_dir / "vacancy.md").write_text(
+            frontmatter.serialize(metadata, f"# {role}\n"), encoding="utf-8"
+        )
+
+
+def _write_orphan_documents_dir(vault_dir: Path) -> None:
+    """A documents/ directory with no sibling vacancy.md."""
+    slug = "orphan-doc-vault-corp"
+    company_dir = _write_broken_company(vault_dir, slug, "Orphan Doc Vault Corp")
+    docs_dir = company_dir / "orphan-vacancy" / "documents"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    document = Document(
+        id="orphan-doc-1",
+        vacancy_id="orphan-vacancy",
+        kind=DocumentKind.NOTE,
+        title="Orphan note",
+        date=date(2026, 1, 1),
+    )
+    metadata = document.model_dump(mode="json", exclude_none=True)
+    (docs_dir / f"{document.id}.md").write_text(
+        frontmatter.serialize(metadata, "An orphaned note with no vacancy.md.\n"),
+        encoding="utf-8",
+    )
+
+
+def write_broken_fixtures(vault_dir: Path) -> None:
+    """Add malformed fixtures for vault-reader's resilience tests.
+
+    Additive only: writes new company directories with names that don't
+    collide with `SYNTHETIC_COMPANY_NAMES`, and never touches a file the
+    healthy tree (`generate_vault`) already wrote.
+    """
+    _write_malformed_yaml_vacancy(vault_dir)
+    _write_unknown_status_vacancy(vault_dir)
+    _write_unreadable_vacancy(vault_dir)
+    _write_duplicate_id_vacancies(vault_dir)
+    _write_orphan_documents_dir(vault_dir)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=20260101)
     parser.add_argument("--output", type=Path, default=Path(__file__).parent / "vault")
+    parser.add_argument(
+        "--broken",
+        action="store_true",
+        help="Also write malformed fixtures for vault-reader's resilience tests",
+    )
     args = parser.parse_args()
     generate_vault(args.output, seed=args.seed)
+    if args.broken:
+        write_broken_fixtures(args.output)
 
 
 if __name__ == "__main__":

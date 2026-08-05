@@ -7,4 +7,6 @@ dist/
 *.egg-info/
 .index/
 .env
-vault/
+# A locally-configured vault at the repo root only - not the committed
+# test fixture tree at tests/fixtures/vault/.
+/vault/
