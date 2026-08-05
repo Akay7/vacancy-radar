@@ -107,12 +107,16 @@ def _clear_search_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_search_config_constructs_with_documented_defaults() -> None:
+    """`default_vector_weight` and `fusion_strategy` are stage 5's
+    eval-harness-measured winner, not stage 4's original guess - see
+    `SearchConfig`'s docstring and README.md's retrieval evaluation
+    table."""
     config = SearchConfig()
 
     assert config.default_mode == "hybrid"
-    assert config.default_vector_weight == 0.7  # noqa: PLR2004 - the documented default
+    assert config.default_vector_weight == 0.5  # noqa: PLR2004 - the documented default
     assert config.default_limit == 10  # noqa: PLR2004 - the documented default
-    assert config.fusion_strategy == FusionStrategy.RRF
+    assert config.fusion_strategy == FusionStrategy.LINEAR_COMBINATION
 
 
 def test_resolve_search_config_with_unset_environment_matches_field_defaults() -> None:

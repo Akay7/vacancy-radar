@@ -1,0 +1,321 @@
+# Stage 5's labelled query set, run against the committed fixture vault
+# (tests/fixtures/vault). Every expected_doc_ids entry must exist as a
+# doc_id in the index built from that vault - tests/eval/test_queries.py
+# fails the suite if any goes stale.
+#
+# Never written against real vacancy data; no real company name appears
+# here. Vacancy-row hits use the "vacancy:<vacancy_id>" doc_id build.py
+# assigns to denormalized vacancy rows; document hits use the document's
+# own id.
+
+- id: exact-name-sample-solutions
+  query: "Sample Solutions"
+  expected_doc_ids:
+    - "vacancy:2022-08-05-sample-solutions-engineering-manager"
+  category: exact_name
+  note: >-
+    Company name unique to a single fixture vacancy; keyword mode should
+    dominate on an exact proper noun.
+
+- id: exact-name-oduvanchik-non-ascii
+  query: "Одуванчик"
+  expected_doc_ids:
+    - "vacancy:2024-03-20-oduvanchik-data-analyst"
+  category: exact_name
+  note: >-
+    Non-ascii (Cyrillic) company name, unique to a single fixture
+    vacancy.
+
+- id: exact-name-recruiter-anna-fischer
+  query: "Anna Fischer"
+  expected_doc_ids:
+    - "vacancy:2022-08-05-sample-solutions-engineering-manager"
+  category: exact_name
+  note: >-
+    Recruiter proper noun appearing only in the vacancy row's
+    denormalized text, not in any document body.
+
+- id: exact-name-recruiter-tom-kuznetsova
+  query: "Tom Kuznetsova"
+  expected_doc_ids:
+    - "vacancy:2024-03-20-oduvanchik-data-analyst"
+    - "2024-03-20-oduvanchik-data-analyst-doc2"
+  category: exact_name
+  note: >-
+    Recruiter proper noun appearing in both the vacancy row and one
+    email document's signature.
+
+- id: exact-name-recruiter-anna-andersen
+  query: "Anna Andersen"
+  expected_doc_ids:
+    - "vacancy:2022-03-22-acme-corp-backend-engineer"
+    - "2022-03-22-acme-corp-backend-engineer-doc6"
+  category: exact_name
+  note: >-
+    Recruiter proper noun; disambiguates between Acme Corp's two
+    vacancies, since the other uses a different recruiter.
+
+- id: technical-clickhouse
+  query: "ClickHouse"
+  expected_doc_ids:
+    - "search-fixture-terms-doc1"
+  category: technical
+  note: >-
+    Rare stack term appearing in exactly one fixture document (stage 4's
+    RARE_TECH_TERM).
+
+- id: technical-postgresql
+  query: "PostgreSQL"
+  expected_doc_ids:
+    - "search-fixture-terms-doc2"
+  category: technical
+  note: >-
+    Adjacent-but-distinct stack term (stage 4's ADJACENT_TECH_TERM), in
+    a different document than ClickHouse.
+
+- id: technical-machine-learning-engineer
+  query: "Machine Learning Engineer"
+  expected_doc_ids:
+    - "vacancy:2024-11-20-widget-works-machine-learning-engineer"
+  category: technical
+  note: >-
+    Role title unique to a single fixture vacancy, used as a stand-in
+    technical/domain term.
+
+- id: technical-site-reliability-engineer
+  query: "Site Reliability Engineer"
+  expected_doc_ids:
+    - "vacancy:2023-03-04-vaporware-studio-site-reliability-engineer"
+  category: technical
+  note: >-
+    Role title unique to a single fixture vacancy.
+
+- id: technical-devops-engineer
+  query: "DevOps Engineer"
+  expected_doc_ids:
+    - "vacancy:2022-03-22-vaporware-studio-devops-engineer"
+  category: technical
+  note: >-
+    Role title unique to a single fixture vacancy, distinct from
+    Vaporware Studio's other (Site Reliability Engineer) vacancy.
+
+- id: paraphrase-distributed-consensus-1
+  query: >-
+    How capably did the applicant perform when explaining how a
+    company's information gets split across many machines and kept
+    consistent with each other throughout their face-to-face meetings?
+  expected_doc_ids:
+    - "search-fixture-paraphrase-doc1"
+  category: paraphrase
+  note: >-
+    Stage 4's SEMANTIC_PARAPHRASE_QUERY verbatim; shares no content word
+    with its target's domain-specific phrasing.
+
+- id: paraphrase-distributed-consensus-2
+  query: >-
+    Was the person being evaluated skilled at agreeing on shared data
+    across many separate servers while dividing large datasets into
+    pieces, based on what was seen in their face-to-face meeting?
+  expected_doc_ids:
+    - "search-fixture-paraphrase-doc1"
+  category: paraphrase
+  note: >-
+    A second, independently-worded paraphrase of the same target
+    document, verified content-word-free by test.
+
+- id: paraphrase-distributed-consensus-3
+  query: >-
+    How well could the applicant describe methods computers use to stay
+    in agreement with one another and break a large collection of
+    records into smaller chunks spread across machines?
+  expected_doc_ids:
+    - "search-fixture-paraphrase-doc1"
+  category: paraphrase
+  note: >-
+    A third independently-worded paraphrase of the same target
+    document.
+
+- id: paraphrase-distributed-consensus-4
+  query: >-
+    During their face-to-face session, how effectively did the person
+    show they understood keeping copies of data in sync across a
+    network and dividing a big dataset among several computers?
+  expected_doc_ids:
+    - "search-fixture-paraphrase-doc1"
+  category: paraphrase
+  note: >-
+    A fourth independently-worded paraphrase of the same target
+    document. The fixture generator has only one distinctive paraphrase
+    target, so this category measures semantic consistency across
+    differently-worded queries against it rather than diversity of
+    targets - see design.md.
+
+- id: temporal-acme-corp-applied
+  query: "Which Acme Corp opportunity have I already applied to?"
+  expected_doc_ids:
+    - "vacancy:2024-12-14-acme-corp-frontend-developer"
+  category: temporal
+  note: >-
+    Raw dates aren't part of indexed text, so recency phrasing is
+    disambiguated via status (applied) rather than a literal date - the
+    vault's real temporal signal (see design.md).
+
+- id: temporal-kolokolchik-offer
+  query: "Which Колокольчик role did I get an offer for?"
+  expected_doc_ids:
+    - "vacancy:2023-06-11-kolokolchik-product-designer"
+  category: temporal
+  note: >-
+    Status (offer) disambiguates among Колокольчик's three vacancies,
+    spanning three different years.
+
+- id: temporal-blueprint-works-take-home
+  query: >-
+    Which Blueprint Works position is currently at the take-home
+    assignment stage?
+  expected_doc_ids:
+    - "vacancy:2024-06-19-blueprint-works-qa-engineer"
+  category: temporal
+  note: >-
+    Status (take_home) disambiguates Blueprint Works' two vacancies from
+    different years.
+
+- id: temporal-vaporware-studio-active
+  query: "Which Vaporware Studio role am I still actively in process for?"
+  expected_doc_ids:
+    - "vacancy:2023-03-04-vaporware-studio-site-reliability-engineer"
+  category: temporal
+  note: >-
+    Status (applied) disambiguates Vaporware Studio's two vacancies from
+    different years.
+
+- id: multi-result-shared-pipeline-phrase
+  query: "Tell me about the team's asynchronous event sourcing pipeline."
+  expected_doc_ids:
+    - "search-fixture-multi-a-doc1"
+    - "search-fixture-multi-b-doc1"
+  category: multi_result
+  note: >-
+    A deliberately controlled two-document overlap added for this eval
+    (tasks.md section 1), not an incidental one.
+
+- id: multi-result-kolokolchik-company
+  query: "Колокольчик"
+  expected_doc_ids:
+    - "vacancy:2022-10-07-kolokolchik-qa-engineer"
+    - "vacancy:2023-06-11-kolokolchik-product-designer"
+    - "vacancy:2024-07-04-kolokolchik-technical-writer"
+  category: multi_result
+  note: "Company name shared by three fixture vacancies."
+
+- id: multi-result-frontend-developer-role
+  query: "Frontend Developer"
+  expected_doc_ids:
+    - "vacancy:2024-12-14-acme-corp-frontend-developer"
+    - "vacancy:2022-06-06-foobar-industries-frontend-developer"
+    - "vacancy:2025-09-08-widget-works-frontend-developer"
+  category: multi_result
+  note: "Role title shared by three vacancies across three companies."
+
+- id: multi-result-backend-engineer-role
+  query: "Backend Engineer"
+  expected_doc_ids:
+    - "vacancy:2022-03-22-acme-corp-backend-engineer"
+    - "vacancy:2022-06-14-blueprint-works-backend-engineer"
+    - "vacancy:2024-07-12-dummy-data-co-backend-engineer"
+    - "vacancy:2023-10-24-example-systems-backend-engineer"
+    - "vacancy:2023-06-20-sandbox-systems-backend-engineer"
+  category: multi_result
+  note: >-
+    Role title shared by five vacancies across five companies - the
+    widest overlap in the fixture vault.
+
+- id: filtered-oduvanchik-data-analyst
+  query: "Data Analyst"
+  filter:
+    company_slug: "oduvanchik"
+  expected_doc_ids:
+    - "vacancy:2024-03-20-oduvanchik-data-analyst"
+    - "2024-03-20-oduvanchik-data-analyst-doc1"
+    - "2024-03-20-oduvanchik-data-analyst-doc2"
+    - "2024-03-20-oduvanchik-data-analyst-doc3"
+    - "2024-03-20-oduvanchik-data-analyst-doc4"
+    - "2024-03-20-oduvanchik-data-analyst-doc5"
+  category: filtered
+  note: >-
+    "Data Analyst" alone matches several companies; company_slug
+    restricts to Одуванчик's single vacancy, where the role name appears
+    in every row.
+
+- id: filtered-sample-solutions-engineering-manager
+  query: "Engineering Manager"
+  filter:
+    company_slug: "sample-solutions"
+  expected_doc_ids:
+    - "vacancy:2022-08-05-sample-solutions-engineering-manager"
+    - "2022-08-05-sample-solutions-engineering-manager-doc1"
+    - "2022-08-05-sample-solutions-engineering-manager-doc2"
+    - "2022-08-05-sample-solutions-engineering-manager-doc3"
+  category: filtered
+  note: >-
+    "Engineering Manager" also matches Foobar Industries; company_slug
+    restricts to Sample Solutions' single vacancy.
+
+- id: filtered-backend-engineer-offer-status
+  query: "Backend Engineer"
+  filter:
+    status:
+      - "offer"
+  expected_doc_ids:
+    - "vacancy:2024-07-12-dummy-data-co-backend-engineer"
+    - "2024-07-12-dummy-data-co-backend-engineer-doc1"
+    - "2024-07-12-dummy-data-co-backend-engineer-doc2"
+    - "2024-07-12-dummy-data-co-backend-engineer-doc3"
+    - "2024-07-12-dummy-data-co-backend-engineer-doc4"
+    - "2024-07-12-dummy-data-co-backend-engineer-doc5"
+  category: filtered
+  note: >-
+    The same role title matches five vacancies (see
+    multi-result-backend-engineer-role); the status filter narrows to
+    the one currently at offer stage.
+
+- id: filtered-frontend-developer-since-2025
+  query: "Frontend Developer"
+  filter:
+    since: "2025-01-01"
+  expected_doc_ids:
+    - "vacancy:2025-09-08-widget-works-frontend-developer"
+    - "2025-09-08-widget-works-frontend-developer-doc1"
+    - "2025-09-08-widget-works-frontend-developer-doc2"
+    - "2025-09-08-widget-works-frontend-developer-doc3"
+    - "2025-09-08-widget-works-frontend-developer-doc4"
+    - "2025-09-08-widget-works-frontend-developer-doc5"
+  category: filtered
+  note: >-
+    The same role title matches three vacancies (see
+    multi-result-frontend-developer-role); since=2025-01-01 narrows to
+    the one found this year.
+
+- id: negative-medieval-siege
+  query: "medieval castle siege tactics and fortification design"
+  expected_doc_ids: []
+  category: negative
+  note: "No fixture content relates to this topic at all."
+
+- id: negative-sourdough-bread
+  query: "sourdough bread starter hydration ratio troubleshooting"
+  expected_doc_ids: []
+  category: negative
+  note: "No fixture content relates to this topic at all."
+
+- id: negative-arctic-terns
+  query: "migratory patterns of Arctic tern populations"
+  expected_doc_ids: []
+  category: negative
+  note: "No fixture content relates to this topic at all."
+
+- id: negative-bike-tire-pressure
+  query: "recommended tire pressure for a mountain bike in winter"
+  expected_doc_ids: []
+  category: negative
+  note: "No fixture content relates to this topic at all."

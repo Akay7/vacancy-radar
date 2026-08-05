@@ -179,6 +179,14 @@ SEMANTIC_PARAPHRASE_QUERY = (
     "consistent with each other throughout their face-to-face meetings?"
 )
 
+MULTI_RESULT_SHARED_PHRASE = "asynchronous event sourcing pipeline"
+"""Appears in exactly two documents, in two different vacancies - a
+deliberate, controlled overlap for stage 5's `multi_result` eval
+category, rather than relying on an incidental overlap (e.g. a repeated
+role title) that could shift if the generator's random pools change."""
+
+MULTI_RESULT_DOC_IDS = ("search-fixture-multi-a-doc1", "search-fixture-multi-b-doc1")
+
 MIN_COMPANIES = 12
 MAX_COMPANIES = 20
 MIN_VACANCIES_PER_COMPANY = 1
@@ -501,6 +509,40 @@ def write_search_fixtures(vault_dir: Path) -> None:
                 DocumentKind.NOTE,
                 "Note phrased in domain-specific language",
                 SEMANTIC_PARAPHRASE_TARGET_TEXT,
+            ),
+        ],
+    )
+
+    _write_search_fixture_vacancy(
+        company_dir,
+        vacancy_id="search-fixture-multi-a",
+        role="Search Fixture Multi Result Role A",
+        documents=[
+            (
+                MULTI_RESULT_DOC_IDS[0],
+                DocumentKind.NOTE,
+                "Note describing the team's architecture",
+                (
+                    f"Engineering notes: the backend team built an "
+                    f"{MULTI_RESULT_SHARED_PHRASE} to keep services in sync."
+                ),
+            ),
+        ],
+    )
+
+    _write_search_fixture_vacancy(
+        company_dir,
+        vacancy_id="search-fixture-multi-b",
+        role="Search Fixture Multi Result Role B",
+        documents=[
+            (
+                MULTI_RESULT_DOC_IDS[1],
+                DocumentKind.NOTE,
+                "Note describing a different team's architecture",
+                (
+                    f"Onsite debrief: this team also relies on an "
+                    f"{MULTI_RESULT_SHARED_PHRASE} for cross-service updates."
+                ),
             ),
         ],
     )

@@ -9,6 +9,8 @@ from generate import (
     EMAIL_MARKER_PHRASES,
     FIRST_NAMES,
     LAST_NAMES,
+    MULTI_RESULT_DOC_IDS,
+    MULTI_RESULT_SHARED_PHRASE,
     RARE_TECH_TERM,
     REQUIRED_UNKNOWN_ROLE_COUNT,
     SEARCH_FIXTURE_COMPANY_SLUG,
@@ -337,6 +339,19 @@ def test_paraphrase_target_document_exists_with_expected_text(
     ]
 
     assert matching == [SEMANTIC_PARAPHRASE_TARGET_TEXT]
+
+
+def test_multi_result_shared_phrase_appears_in_exactly_the_two_documented_documents(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    vault = _generate_with_search_fixtures(tmp_path_factory, "multi-result")
+    bodies = _all_document_bodies(vault)
+
+    matches = {
+        path.stem for path, body in bodies.items() if MULTI_RESULT_SHARED_PHRASE in body
+    }
+
+    assert matches == set(MULTI_RESULT_DOC_IDS)
 
 
 _WORD_RE = re.compile(r"[A-Za-z']+")

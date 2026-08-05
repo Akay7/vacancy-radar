@@ -135,6 +135,22 @@ def test_search_config_default_mode_is_a_valid_search_mode() -> None:
     assert SearchMode(SearchConfig().default_mode) in set(SearchMode)
 
 
+def test_search_config_defaults_match_the_eval_harness_measured_winner() -> None:
+    """Stage 5's eval-harness change measured recall@5/MRR across every
+    (mode, vector_weight, fusion_strategy) combination against the
+    fixture vault and set these two defaults from that measurement, not
+    a guess - see eval-harness's tasks.md section 5 for the recorded
+    numbers and README.md's retrieval evaluation table. A regression
+    guard: if this ever fails, the defaults drifted from what was
+    actually measured."""
+    from vacancy_radar.config import FusionStrategy  # noqa: PLC0415
+
+    config = SearchConfig()
+
+    assert config.default_vector_weight == 0.5  # noqa: PLR2004 - the measured winner
+    assert config.fusion_strategy is FusionStrategy.LINEAR_COMBINATION
+
+
 def test_search_results_and_search_hit_construct_with_the_documented_fields() -> None:
     hit = SearchHit(
         doc_id="doc-1",
@@ -681,7 +697,14 @@ def _fix_candidate_pool_depth(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_dual_path_hit_outranks_single_path_hit(
     fixture_index: IndexHandle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """RRF's rank-sum scoring (`Σ 1/(rank + K)` across whichever paths a
+    candidate appears in) is what guarantees this ordering by
+    construction - explicitly requested here rather than assumed from
+    whatever `SearchConfig.fusion_strategy`'s current default happens to
+    be (stage 5's eval-harness change retuned that default; see
+    config.py's docstring)."""
     _fix_candidate_pool_depth(monkeypatch)
+    monkeypatch.setenv("SEARCH_FUSION_STRATEGY", "rrf")
 
     results = search(fixture_index, _HYBRID_QUERY, mode=SearchMode.HYBRID, limit=60)
 
@@ -792,8 +815,14 @@ def test_extreme_vector_weight_approximates_single_mode_ordering(
 
 @pytest.mark.embedding
 def test_effective_vector_weight_is_none_under_default_rrf_fusion(
-    fixture_index: IndexHandle,
+    fixture_index: IndexHandle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Explicitly requests RRF fusion rather than assuming it's
+    `SearchConfig`'s current default - stage 5's eval-harness change
+    retuned that default to Linear Combination; see config.py's
+    docstring."""
+    monkeypatch.setenv("SEARCH_FUSION_STRATEGY", "rrf")
+
     results = search(
         fixture_index,
         _HYBRID_QUERY,

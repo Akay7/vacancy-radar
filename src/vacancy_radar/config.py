@@ -97,8 +97,26 @@ _SEARCH_FUSION_STRATEGY_ENV = "SEARCH_FUSION_STRATEGY"
 
 @dataclass(frozen=True)
 class SearchConfig:
-    """`search()`'s configurable defaults - stage 5 retunes these from
-    measurement, without editing `search.py` (see design.md).
+    """`search()`'s configurable defaults - stage 5 retuned
+    `default_vector_weight` and `fusion_strategy` from measurement,
+    without editing `search.py` (see design.md).
+
+    `default_vector_weight=0.5` and `fusion_strategy=LINEAR_COMBINATION`
+    are the eval-harness change's measured winner, not a guess: a
+    30-query sweep across keyword, semantic, and hybrid (5 weights x 2
+    fusion strategies) against the fixture vault found Linear
+    Combination fusion at vector_weight 0.3-0.6 tied for the best
+    overall recall@5 (0.794, vs. keyword's 0.761 and semantic's 0.678),
+    with 0.7 tying on recall but scoring lower on MRR - 0.5 is the
+    middle of that tied band. This **contradicts stage 4's default
+    fusion choice**: RRF (the previous default) actually
+    *underperforms* plain keyword search on this corpus (overall
+    recall@5 0.672, identical across every weight, since RRF is rank-
+    based and weight-agnostic) - see README.md's retrieval evaluation
+    table and this change's tasks.md section 5 for the full numbers.
+    Stage 4's keyword-favors-proper-nouns hypothesis held on the
+    `exact_name` category specifically, but not as a reason to prefer
+    RRF fusion overall.
 
     `default_mode` is a plain `str` (one of `SearchMode`'s values, e.g.
     `"hybrid"`), not a `SearchMode` member: importing `SearchMode` here
@@ -110,9 +128,9 @@ class SearchConfig:
     """
 
     default_mode: str = "hybrid"
-    default_vector_weight: float = 0.7
+    default_vector_weight: float = 0.5
     default_limit: int = 10
-    fusion_strategy: FusionStrategy = FusionStrategy.RRF
+    fusion_strategy: FusionStrategy = FusionStrategy.LINEAR_COMBINATION
 
 
 _VALID_SEARCH_MODES = frozenset({"keyword", "semantic", "hybrid"})
