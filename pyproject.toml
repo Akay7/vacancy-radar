@@ -1,0 +1,47 @@
+[project]
+name = "vacancy-radar"
+version = "0.1.0"
+description = "Local-first job application tracker with hybrid search and an MCP server."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "typer>=0.27.1",
+    "rich>=15.0.0",
+    "pydantic>=2.13.4",
+]
+
+[project.scripts]
+vacancy-radar = "vacancy_radar.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vacancy_radar"]
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",       # docstrings not required for this stage
+    "COM812",  # trailing-comma rule conflicts with the formatter
+    "CPY001",  # no per-file copyright headers; LICENSE covers it
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]  # assert is expected in tests
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
