@@ -27,7 +27,7 @@ from vacancy_radar.index.embed import (
     vector_dim,
 )
 from vacancy_radar.index.extract import ELIGIBLE_SUFFIXES, extract_to_sidecar
-from vacancy_radar.index.schema import build_schema
+from vacancy_radar.index.schema import build_schema, schema_with_model_metadata
 from vacancy_radar.models import Document, Vacancy
 from vacancy_radar.vault.paths import sidecar_path_for
 from vacancy_radar.vault.reader import VaultSnapshot, VaultWarning
@@ -90,7 +90,7 @@ def build_index(
 
     dim = vector_dim(model_name)
     connection = lancedb.connect(index_path)
-    table, is_fresh = _open_or_create_table(connection, dim)
+    table, is_fresh = _open_or_create_table(connection, dim, model_name)
 
     existing_hashes = {} if is_fresh else _existing_hashes(table)
 
@@ -152,22 +152,33 @@ def _extract_eligible_sidecars(
 
 
 def _open_or_create_table(
-    connection: "lancedb.DBConnection", dim: int
+    connection: "lancedb.DBConnection", dim: int, model_name: str
 ) -> tuple["Table", bool]:
     """Open the table, creating it if absent. Recreates it from scratch
     if its vector dimensionality no longer matches the configured
     model - `force` alone never drops existing data, only a genuine
-    model/dimension change does."""
+    model/dimension change does.
+
+    Every table this function *creates* (fresh, or a dimension-mismatch
+    recreate) is stamped with `model_name` in its schema metadata (see
+    schema.py's `schema_with_model_metadata`) - stage 4's semantic
+    search reads this back to embed queries with the model that
+    actually built the table's vectors, never a possibly-drifted
+    default. A table it merely *reopens* is left untouched: this
+    function has no way to know whether unchanged-hash rows were
+    actually re-embedded with `model_name` (see design.md's Risks for
+    the same-dimension-model-swap gap this doesn't close)."""
     schema = build_schema(dim)
+    arrow_schema = schema_with_model_metadata(schema, model_name)
     try:
         table = connection.open_table(TABLE_NAME)
     except ValueError:
-        return connection.create_table(TABLE_NAME, schema=schema), True
+        return connection.create_table(TABLE_NAME, schema=arrow_schema), True
 
     existing_dim = table.schema.field("vector").type.list_size
     if existing_dim != dim:
         connection.drop_table(TABLE_NAME)
-        return connection.create_table(TABLE_NAME, schema=schema), True
+        return connection.create_table(TABLE_NAME, schema=arrow_schema), True
     return table, False
 
 

@@ -8,6 +8,8 @@ import pytest
 
 from vacancy_radar import frontmatter
 from vacancy_radar.index.build import build_index
+from vacancy_radar.index.embed import DEFAULT_EMBEDDING_MODEL_NAME
+from vacancy_radar.index.schema import read_embedding_model
 from vacancy_radar.models import Company, Document, DocumentKind, Status, Vacancy
 from vacancy_radar.vault.paths import VAULT_MARKER_DIRNAME
 from vacancy_radar.vault.reader import VaultWarning, read_vault
@@ -124,6 +126,51 @@ def _small_vault(tmp_path: Path) -> Path:
         body="Thanks for applying, we would like to schedule a call.",
     )
     return vault
+
+
+# --- Embedding-model provenance (stage 4) -----------------------------------
+
+_OTHER_DIM_MODEL_NAME = "BAAI/bge-small-zh-v1.5"
+"""A second model, cached locally, whose native dimension (512) differs
+from `DEFAULT_EMBEDDING_MODEL_NAME`'s (384) - used only to exercise the
+dimension-mismatch recreate path, never for embedding quality."""
+
+
+@pytest.mark.embedding
+def test_fresh_build_records_the_model_it_was_called_with(tmp_path: Path) -> None:
+    vault = _small_vault(tmp_path)
+    index_path = tmp_path / ".index"
+
+    build_index(read_vault(vault), index_path, model_name=DEFAULT_EMBEDDING_MODEL_NAME)
+
+    table = lancedb.connect(index_path).open_table("documents")
+    assert read_embedding_model(table) == DEFAULT_EMBEDDING_MODEL_NAME
+
+
+@pytest.mark.embedding
+def test_dimension_mismatch_recreate_records_the_new_model(tmp_path: Path) -> None:
+    vault = _small_vault(tmp_path)
+    index_path = tmp_path / ".index"
+    build_index(read_vault(vault), index_path, model_name=DEFAULT_EMBEDDING_MODEL_NAME)
+
+    build_index(read_vault(vault), index_path, model_name=_OTHER_DIM_MODEL_NAME)
+
+    table = lancedb.connect(index_path).open_table("documents")
+    assert read_embedding_model(table) == _OTHER_DIM_MODEL_NAME
+
+
+@pytest.mark.embedding
+def test_incremental_build_with_unchanged_model_leaves_metadata_untouched(
+    tmp_path: Path,
+) -> None:
+    vault = _small_vault(tmp_path)
+    index_path = tmp_path / ".index"
+    build_index(read_vault(vault), index_path, model_name=DEFAULT_EMBEDDING_MODEL_NAME)
+
+    build_index(read_vault(vault), index_path, model_name=DEFAULT_EMBEDDING_MODEL_NAME)
+
+    table = lancedb.connect(index_path).open_table("documents")
+    assert read_embedding_model(table) == DEFAULT_EMBEDDING_MODEL_NAME
 
 
 # --- Section 11: building from empty ---------------------------------------

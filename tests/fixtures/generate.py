@@ -142,6 +142,43 @@ NON_EMAIL_BODIES = {
 VAULT_MARKER_DIRNAME = ".vacancy-radar"
 """The vault marker directory `config.resolve_vault_path` looks for."""
 
+# --- Fixed (non-random) content for stage 4's retrieval tests --------------
+#
+# Unlike everything above, this content is never drawn from `rng` - stage
+# 4's keyword/semantic scenarios need exact, reproducible strings to search
+# for for, not merely a deterministic *selection* from a pool. Written by
+# `write_search_fixtures`, called unconditionally (like the healthy tree,
+# not opt-in like `--broken`).
+
+SEARCH_FIXTURE_COMPANY_SLUG = "search-fixtures-corp"
+SEARCH_FIXTURE_COMPANY_NAME = "Search Fixtures Corp"
+
+DISTINCTIVE_PROPER_NOUN = "Glimmerforge"
+"""Appears in exactly one document across the whole fixture vault - a
+fabricated word chosen so no pool above could ever produce it by chance."""
+
+RARE_TECH_TERM = "ClickHouse"
+"""Appears in exactly one document; `ADJACENT_TECH_TERM` appears in a
+different document so a query for one must not return the other."""
+
+ADJACENT_TECH_TERM = "PostgreSQL"
+
+SEMANTIC_PARAPHRASE_TARGET_DOC_ID = "search-fixture-paraphrase-doc1"
+"""The document `SEMANTIC_PARAPHRASE_QUERY` should retrieve under semantic
+search despite sharing no content word with it."""
+
+SEMANTIC_PARAPHRASE_TARGET_TEXT = (
+    "The candidate demonstrated strong proficiency in distributed "
+    "consensus algorithms and horizontal database sharding strategies "
+    "during the onsite technical interview loop."
+)
+
+SEMANTIC_PARAPHRASE_QUERY = (
+    "How capably did the applicant perform when explaining how a "
+    "company's information gets split across many machines and kept "
+    "consistent with each other throughout their face-to-face meetings?"
+)
+
 MIN_COMPANIES = 12
 MAX_COMPANIES = 20
 MIN_VACANCIES_PER_COMPANY = 1
@@ -399,6 +436,118 @@ def _write_vault(
             )
 
 
+def write_search_fixtures(vault_dir: Path) -> None:
+    """Add fixed, non-random content stage 4's retrieval tests need.
+
+    Additive only, like `write_broken_fixtures`: a company slug that
+    collides with nothing in `SYNTHETIC_COMPANY_NAMES` or the broken-
+    fixture slugs, never touching a file the healthy tree writes.
+    """
+    company_dir = vault_dir / SEARCH_FIXTURE_COMPANY_SLUG
+    company_dir.mkdir(parents=True, exist_ok=True)
+    company = Company(
+        slug=SEARCH_FIXTURE_COMPANY_SLUG,
+        name=SEARCH_FIXTURE_COMPANY_NAME,
+        domains=[f"{SEARCH_FIXTURE_COMPANY_SLUG}.example"],
+    )
+    (company_dir / "_company.md").write_text(
+        frontmatter.serialize(company.model_dump(mode="json", exclude_none=True), ""),
+        encoding="utf-8",
+    )
+
+    _write_search_fixture_vacancy(
+        company_dir,
+        vacancy_id="search-fixture-terms",
+        role="Search Fixture Terms Role",
+        documents=[
+            (
+                "search-fixture-terms-doc1",
+                DocumentKind.NOTE,
+                "Note mentioning a distinctive term",
+                (
+                    f"Interview notes: the team's data platform runs on "
+                    f"{RARE_TECH_TERM} for large-scale analytical queries."
+                ),
+            ),
+            (
+                "search-fixture-terms-doc2",
+                DocumentKind.NOTE,
+                "Note mentioning an adjacent term",
+                (
+                    f"Interview notes: the team's primary transactional "
+                    f"store is {ADJACENT_TECH_TERM}, unrelated to the "
+                    f"analytical stack."
+                ),
+            ),
+            (
+                "search-fixture-terms-doc3",
+                DocumentKind.NOTE,
+                "Note mentioning a distinctive proper noun",
+                (
+                    f"Recruiter mentioned the team ships a side project "
+                    f"internally nicknamed {DISTINCTIVE_PROPER_NOUN}."
+                ),
+            ),
+        ],
+    )
+
+    _write_search_fixture_vacancy(
+        company_dir,
+        vacancy_id="search-fixture-paraphrase",
+        role="Search Fixture Paraphrase Role",
+        documents=[
+            (
+                SEMANTIC_PARAPHRASE_TARGET_DOC_ID,
+                DocumentKind.NOTE,
+                "Note phrased in domain-specific language",
+                SEMANTIC_PARAPHRASE_TARGET_TEXT,
+            ),
+        ],
+    )
+
+
+def _write_search_fixture_vacancy(
+    company_dir: Path,
+    *,
+    vacancy_id: str,
+    role: str,
+    documents: list[tuple[str, DocumentKind, str, str]],
+) -> None:
+    vacancy_dir = company_dir / vacancy_id
+    vacancy_dir.mkdir(parents=True, exist_ok=True)
+    vacancy = Vacancy(
+        id=vacancy_id,
+        company=SEARCH_FIXTURE_COMPANY_NAME,
+        company_slug=SEARCH_FIXTURE_COMPANY_SLUG,
+        role=role,
+        source_url=f"https://jobs.{SEARCH_FIXTURE_COMPANY_SLUG}.example/{vacancy_id}",
+        status=Status.FOUND,
+        found_date=date(2025, 6, 1),
+    )
+    metadata = vacancy.model_dump(
+        mode="json", exclude={"role_is_placeholder"}, exclude_none=True
+    )
+    (vacancy_dir / "vacancy.md").write_text(
+        frontmatter.serialize(metadata, f"# {role} at {SEARCH_FIXTURE_COMPANY_NAME}\n"),
+        encoding="utf-8",
+    )
+
+    docs_dir = vacancy_dir / "documents"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    for doc_id, kind, title, body in documents:
+        document = Document(
+            id=doc_id,
+            vacancy_id=vacancy_id,
+            kind=kind,
+            title=title,
+            date=date(2025, 6, 2),
+        )
+        doc_metadata = document.model_dump(mode="json", exclude_none=True)
+        (docs_dir / f"{doc_id}.md").write_text(
+            frontmatter.serialize(doc_metadata, body), encoding="utf-8"
+        )
+
+
 def _write_broken_company(vault_dir: Path, slug: str, name: str) -> Path:
     company_dir = vault_dir / slug
     company_dir.mkdir(parents=True, exist_ok=True)
@@ -542,6 +691,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     generate_vault(args.output, seed=args.seed)
+    write_search_fixtures(args.output)
     if args.broken:
         write_broken_fixtures(args.output)
 

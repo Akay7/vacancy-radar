@@ -1,16 +1,25 @@
 import os
+import re
 from pathlib import Path
 
 import pytest
 from generate import (
+    ADJACENT_TECH_TERM,
+    DISTINCTIVE_PROPER_NOUN,
     EMAIL_MARKER_PHRASES,
     FIRST_NAMES,
     LAST_NAMES,
+    RARE_TECH_TERM,
     REQUIRED_UNKNOWN_ROLE_COUNT,
+    SEARCH_FIXTURE_COMPANY_SLUG,
+    SEMANTIC_PARAPHRASE_QUERY,
+    SEMANTIC_PARAPHRASE_TARGET_DOC_ID,
+    SEMANTIC_PARAPHRASE_TARGET_TEXT,
     SYNTHETIC_COMPANY_NAMES,
     VAULT_MARKER_DIRNAME,
     generate_vault,
     write_broken_fixtures,
+    write_search_fixtures,
 )
 
 from vacancy_radar.frontmatter import parse
@@ -252,3 +261,125 @@ def test_broken_mode_adds_malformed_fixtures(
         p for p in vault.glob("*/*/documents") if not (p.parent / "vacancy.md").exists()
     ]
     assert orphan_dirs
+
+
+# --- Search fixtures (stage 4) ----------------------------------------------
+
+
+def _generate_with_search_fixtures(
+    tmp_path_factory: pytest.TempPathFactory, name: str
+) -> Path:
+    vault = _generate(tmp_path_factory, name)
+    write_search_fixtures(vault)
+    return vault
+
+
+def _all_document_bodies(vault: Path) -> dict[Path, str]:
+    bodies = {}
+    for doc_path in vault.glob("*/*/documents/*.md"):
+        _, body = parse(doc_path.read_text(encoding="utf-8"))
+        bodies[doc_path] = body
+    return bodies
+
+
+def test_distinctive_proper_noun_appears_in_exactly_one_document(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    vault = _generate_with_search_fixtures(tmp_path_factory, "proper-noun")
+
+    matches = [
+        path
+        for path, body in _all_document_bodies(vault).items()
+        if DISTINCTIVE_PROPER_NOUN in body
+    ]
+
+    assert len(matches) == 1
+
+
+def test_rare_term_and_adjacent_term_live_in_different_documents(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    vault = _generate_with_search_fixtures(tmp_path_factory, "rare-term")
+    bodies = _all_document_bodies(vault)
+
+    rare_docs = [path for path, body in bodies.items() if RARE_TECH_TERM in body]
+    adjacent_docs = [
+        path for path, body in bodies.items() if ADJACENT_TECH_TERM in body
+    ]
+
+    assert rare_docs
+    assert adjacent_docs
+    assert set(rare_docs).isdisjoint(adjacent_docs)
+    for path in rare_docs:
+        assert ADJACENT_TECH_TERM not in bodies[path]
+    for path in adjacent_docs:
+        assert RARE_TECH_TERM not in bodies[path]
+
+
+def test_search_fixture_company_is_present(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    vault = _generate_with_search_fixtures(tmp_path_factory, "company-present")
+
+    assert (vault / SEARCH_FIXTURE_COMPANY_SLUG / "_company.md").is_file()
+
+
+def test_paraphrase_target_document_exists_with_expected_text(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    vault = _generate_with_search_fixtures(tmp_path_factory, "paraphrase-target")
+    bodies = _all_document_bodies(vault)
+
+    matching = [
+        body
+        for path, body in bodies.items()
+        if path.stem == SEMANTIC_PARAPHRASE_TARGET_DOC_ID
+    ]
+
+    assert matching == [SEMANTIC_PARAPHRASE_TARGET_TEXT]
+
+
+_WORD_RE = re.compile(r"[A-Za-z']+")
+_STOPWORDS = {
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "but",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "in",
+    "on",
+    "at",
+    "to",
+    "of",
+    "for",
+    "with",
+    "each",
+    "other",
+    "their",
+    "how",
+    "did",
+    "do",
+    "when",
+    "during",
+    "throughout",
+    "many",
+}
+
+
+def _content_words(text: str) -> set[str]:
+    return {w.lower() for w in _WORD_RE.findall(text)} - _STOPWORDS
+
+
+def test_paraphrase_query_shares_no_content_words_with_its_target() -> None:
+    target_words = _content_words(SEMANTIC_PARAPHRASE_TARGET_TEXT)
+    query_words = _content_words(SEMANTIC_PARAPHRASE_QUERY)
+
+    assert target_words
+    assert query_words
+    assert target_words.isdisjoint(query_words)

@@ -3,8 +3,12 @@ from pathlib import Path
 import pytest
 
 from vacancy_radar.config import (
+    FusionStrategy,
+    InvalidSearchConfigError,
+    SearchConfig,
     VaultNotConfiguredError,
     VaultNotFoundError,
+    resolve_search_config,
     resolve_vault_path,
 )
 from vacancy_radar.vault.paths import VAULT_MARKER_DIRNAME
@@ -84,3 +88,87 @@ def test_resolved_path_is_absolute_even_when_input_was_relative(
 
     assert resolved.is_absolute()
     assert resolved == relative_vault.resolve()
+
+
+# --- SearchConfig / resolve_search_config (stage 4) -------------------------
+
+_SEARCH_ENV_VARS = (
+    "SEARCH_DEFAULT_MODE",
+    "SEARCH_DEFAULT_VECTOR_WEIGHT",
+    "SEARCH_DEFAULT_LIMIT",
+    "SEARCH_FUSION_STRATEGY",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_search_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _SEARCH_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_search_config_constructs_with_documented_defaults() -> None:
+    config = SearchConfig()
+
+    assert config.default_mode == "hybrid"
+    assert config.default_vector_weight == 0.7  # noqa: PLR2004 - the documented default
+    assert config.default_limit == 10  # noqa: PLR2004 - the documented default
+    assert config.fusion_strategy == FusionStrategy.RRF
+
+
+def test_resolve_search_config_with_unset_environment_matches_field_defaults() -> None:
+    assert resolve_search_config() == SearchConfig()
+
+
+def test_resolve_search_config_default_limit_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEARCH_DEFAULT_LIMIT", "25")
+
+    resolved = resolve_search_config()
+
+    assert resolved.default_limit == 25  # noqa: PLR2004
+    assert resolved.default_mode == SearchConfig().default_mode
+    assert resolved.default_vector_weight == SearchConfig().default_vector_weight
+    assert resolved.fusion_strategy == SearchConfig().fusion_strategy
+
+
+def test_resolve_search_config_default_mode_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEARCH_DEFAULT_MODE", "keyword")
+
+    assert resolve_search_config().default_mode == "keyword"
+
+
+def test_resolve_search_config_default_vector_weight_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEARCH_DEFAULT_VECTOR_WEIGHT", "0.3")
+
+    assert resolve_search_config().default_vector_weight == 0.3  # noqa: PLR2004
+
+
+def test_resolve_search_config_fusion_strategy_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEARCH_FUSION_STRATEGY", "linear_combination")
+
+    assert resolve_search_config().fusion_strategy == FusionStrategy.LINEAR_COMBINATION
+
+
+def test_resolve_search_config_invalid_mode_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEARCH_DEFAULT_MODE", "not_a_real_mode")
+
+    with pytest.raises(InvalidSearchConfigError, match="SEARCH_DEFAULT_MODE"):
+        resolve_search_config()
+
+
+def test_resolve_search_config_invalid_fusion_strategy_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEARCH_FUSION_STRATEGY", "not_a_real_strategy")
+
+    with pytest.raises(InvalidSearchConfigError, match="SEARCH_FUSION_STRATEGY"):
+        resolve_search_config()
