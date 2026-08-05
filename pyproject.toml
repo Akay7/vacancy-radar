@@ -9,6 +9,8 @@ dependencies = [
     "typer>=0.27.1",
     "rich>=15.0.0",
     "pydantic>=2.13.4",
+    "ruamel.yaml>=0.19.1",
+    "text-unidecode>=1.3",
 ]
 
 [project.scripts]
@@ -16,6 +18,7 @@ vacancy-radar = "vacancy_radar.cli:app"
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.0.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.16.1",
@@ -38,10 +41,12 @@ ignore = [
     "D",       # docstrings not required for this stage
     "COM812",  # trailing-comma rule conflicts with the formatter
     "CPY001",  # no per-file copyright headers; LICENSE covers it
+    "INP001",  # tests/ is a deliberately flat, package-less pytest layout
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101"]  # assert is expected in tests
+"tests/**" = ["S101"]  # assert is expected in tests
+"tests/fixtures/generate.py" = ["S311"]  # seeded PRNG for deterministic fixtures, not crypto
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

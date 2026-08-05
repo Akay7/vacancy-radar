@@ -1,0 +1,358 @@
+"""Seeded, deterministic synthetic vault generator.
+
+Writes a fake vault tree to `tests/fixtures/vault/` (committed to the
+repo) so later stages can read a realistic-shaped vault without any
+real company, person, or address ever appearing in it. All names,
+recruiters, and email bodies are drawn from the fixed pools below —
+nothing here is looked up or invented per run.
+
+Layout written per company:
+
+    <company_slug>/
+        _company.md
+        <vacancy_id>/
+            vacancy.md
+            documents/
+                <doc_id>.md
+"""
+
+import argparse
+import random
+from datetime import date, timedelta
+from pathlib import Path
+
+from vacancy_radar import frontmatter
+from vacancy_radar.ids import new_vacancy_id, slugify
+from vacancy_radar.models import (
+    UNKNOWN_ROLE,
+    Company,
+    Document,
+    DocumentKind,
+    Status,
+    Vacancy,
+)
+
+# Placeholder names in the classic "Acme Corp" / "Ромашка" tradition -
+# unambiguous stand-ins, never a real company.
+SYNTHETIC_COMPANY_NAMES = [
+    "Acme Corp",
+    "Widget Works",
+    "Example Systems",
+    "Sample Solutions",
+    "Generic Labs",
+    "Placeholder Studio",
+    "Foobar Industries",
+    "Testcorp",
+    "Sandbox Systems",
+    "Blueprint Works",
+    "Prototype Group",
+    "Vaporware Studio",
+    "Mockup Media",
+    "Stubline Analytics",
+    "Nullpoint Systems",
+    "Dummy Data Co.",
+    "Ромашка",
+    "Одуванчик",
+    "Незабудка",
+    "Колокольчик",
+]
+
+FIRST_NAMES = [
+    "Anna",
+    "Mikhail",
+    "Elena",
+    "Tom",
+    "Priya",
+    "Wei",
+    "Fatima",
+    "Lucas",
+    "Sofia",
+    "Noah",
+]
+
+LAST_NAMES = [
+    "Ivanova",
+    "Smith",
+    "Kuznetsova",
+    "Andersen",
+    "Sharma",
+    "Chen",
+    "Costa",
+    "Nguyen",
+    "Berg",
+    "Fischer",
+]
+
+ROLE_TITLES = [
+    "Backend Engineer",
+    "Data Analyst",
+    "Product Designer",
+    "DevOps Engineer",
+    "QA Engineer",
+    "Machine Learning Engineer",
+    "Frontend Developer",
+    "Engineering Manager",
+    "Site Reliability Engineer",
+    "Technical Writer",
+]
+
+STAGE_NOTES = [
+    "Этап собеседования 🎯",
+    "Ожидаем ответ от рекрутера 📩",
+    "Second round scheduled",
+    "Waiting on take-home feedback",
+    "Recruiter call went well 👍",
+]
+
+EMAIL_MARKER_PHRASES = (
+    "thanks for applying",
+    "following up on your application",
+    "move forward with other candidates",
+    "would like to move forward with an offer",
+)
+
+EMAIL_TEMPLATES = [
+    (
+        "Hi, thanks for applying to the {role} role at {company}. We would "
+        "like to schedule a quick call this week. Best, {recruiter}"
+    ),
+    (
+        "Hello, following up on your application for {role} at {company}. "
+        "Could you share your availability for a screening call? "
+        "Regards, {recruiter}"
+    ),
+    (
+        "Thank you for your interest in the {role} position at {company}. "
+        "Unfortunately we have decided to move forward with other "
+        "candidates at this time. Best regards, {recruiter}"
+    ),
+    (
+        "Congratulations! We would like to move forward with an offer for "
+        "the {role} role at {company}. Let's set up a call to discuss "
+        "details. Warmly, {recruiter}"
+    ),
+]
+
+NON_EMAIL_BODIES = {
+    DocumentKind.POSTING: "Original job posting text for {role} at {company}.",
+    DocumentKind.NOTE: "Personal note: {role} at {company} looks like a good fit.",
+    DocumentKind.TAKEHOME: "Take-home assignment instructions for the {role} role.",
+}
+
+MIN_COMPANIES = 12
+MAX_COMPANIES = 20
+MIN_VACANCIES_PER_COMPANY = 1
+MAX_VACANCIES_PER_COMPANY = 3
+MIN_DOCS_PER_VACANCY = 2
+MAX_DOCS_PER_VACANCY = 6
+REQUIRED_UNKNOWN_ROLE_COUNT = 3
+REPEAT_APPLICATION_COMPANY_COUNT = 2
+STAGE_NOTE_PROBABILITY = 0.6
+SALARY_NOTE_PROBABILITY = 0.5
+EXTERNAL_ID_PROBABILITY = 0.5
+MIN_SALARY_K = 60
+MAX_SALARY_K = 180
+BASE_YEAR = 2022
+YEAR_SPAN = 4  # 2022..2025 - safely in the past regardless of run date
+
+
+def _recruiter_names(rng: random.Random, count: int) -> list[str]:
+    return [f"{rng.choice(FIRST_NAMES)} {rng.choice(LAST_NAMES)}" for _ in range(count)]
+
+
+def _document_body(
+    kind: DocumentKind,
+    role: str,
+    company_name: str,
+    recruiter: str | None,
+    rng: random.Random,
+) -> str:
+    if kind is DocumentKind.EMAIL:
+        template = rng.choice(EMAIL_TEMPLATES)
+        return template.format(
+            role=role, company=company_name, recruiter=recruiter or "The Team"
+        )
+    return NON_EMAIL_BODIES[kind].format(role=role, company=company_name)
+
+
+def _document_title(kind: DocumentKind, role: str, company_name: str) -> str:
+    return f"{kind.value.replace('_', ' ').title()}: {role} at {company_name}"
+
+
+def generate_vault(output_dir: Path, seed: int) -> None:
+    """Generate a deterministic synthetic vault at `output_dir`."""
+    rng = random.Random(seed)
+
+    company_count = rng.randint(MIN_COMPANIES, MAX_COMPANIES)
+    chosen_names = rng.sample(SYNTHETIC_COMPANY_NAMES, company_count)
+
+    vacancy_counts = [
+        rng.randint(MIN_VACANCIES_PER_COMPANY, MAX_VACANCIES_PER_COMPANY)
+        for _ in chosen_names
+    ]
+    for i in range(REPEAT_APPLICATION_COMPANY_COUNT):
+        vacancy_counts[i] = 2
+
+    companies: dict[int, dict[str, object]] = {}
+    for index, name in enumerate(chosen_names):
+        slug = slugify(name)
+        companies[index] = {
+            "name": name,
+            "slug": slug,
+            "domain": f"{slug}.example",
+            "recruiters": _recruiter_names(rng, rng.randint(1, 2)),
+        }
+
+    slots = [
+        (company_index, slot_index)
+        for company_index, count in enumerate(vacancy_counts)
+        for slot_index in range(count)
+    ]
+
+    statuses = list(Status)
+    forced_statuses = dict(enumerate(statuses))
+    total = len(slots)
+    unknown_role_slots = set(range(total - REQUIRED_UNKNOWN_ROLE_COUNT, total))
+
+    existing_ids: set[str] = set()
+    vacancy_records: list[dict[str, object]] = []
+
+    for position, (company_index, slot_index) in enumerate(slots):
+        company = companies[company_index]
+        status = forced_statuses.get(position) or rng.choice(statuses)
+        is_unknown_role = position in unknown_role_slots
+        role = UNKNOWN_ROLE if is_unknown_role else rng.choice(ROLE_TITLES)
+
+        if company_index < REPEAT_APPLICATION_COMPANY_COUNT:
+            year = BASE_YEAR + slot_index * 2
+        else:
+            year = BASE_YEAR + rng.randint(0, YEAR_SPAN - 1)
+        found_date = date(year, rng.randint(1, 12), rng.randint(1, 28))
+
+        applied_date = None
+        if status is not Status.FOUND:
+            applied_date = found_date + timedelta(days=rng.randint(0, 20))
+
+        recruiters = company["recruiters"]
+        recruiter = rng.choice(recruiters) if recruiters else None
+
+        vacancy_id = new_vacancy_id(
+            found_date, str(company["slug"]), role, existing_ids
+        )
+        existing_ids.add(vacancy_id)
+
+        vacancy = Vacancy(
+            id=vacancy_id,
+            company=str(company["name"]),
+            company_slug=str(company["slug"]),
+            role=role,
+            source_url=f"https://jobs.{company['domain']}/postings/{position + 1}",
+            status=status,
+            found_date=found_date,
+            applied_date=applied_date,
+            stage_note=(
+                rng.choice(STAGE_NOTES)
+                if rng.random() < STAGE_NOTE_PROBABILITY
+                else None
+            ),
+            salary_note=(
+                f"{rng.randint(MIN_SALARY_K, MAX_SALARY_K)}k"
+                if rng.random() < SALARY_NOTE_PROBABILITY
+                else None
+            ),
+            recruiter=recruiter,
+            external_id=(
+                f"gmail-{vacancy_id}"
+                if rng.random() < EXTERNAL_ID_PROBABILITY
+                else None
+            ),
+            tags=["needs_review"] if is_unknown_role else [],
+        )
+
+        doc_count = rng.randint(MIN_DOCS_PER_VACANCY, MAX_DOCS_PER_VACANCY)
+        documents = []
+        for doc_index in range(doc_count):
+            kind = rng.choice(list(DocumentKind))
+            doc_date = found_date + timedelta(days=rng.randint(0, 30))
+            doc_id = f"{vacancy_id}-doc{doc_index + 1}"
+            documents.append(
+                {
+                    "document": Document(
+                        id=doc_id,
+                        vacancy_id=vacancy_id,
+                        kind=kind,
+                        title=_document_title(kind, role, str(company["name"])),
+                        date=doc_date,
+                        external_id=(
+                            f"gmail-{doc_id}" if kind is DocumentKind.EMAIL else None
+                        ),
+                    ),
+                    "body": _document_body(
+                        kind, role, str(company["name"]), recruiter, rng
+                    ),
+                }
+            )
+
+        vacancy_records.append(
+            {"company_index": company_index, "vacancy": vacancy, "documents": documents}
+        )
+
+    _write_vault(output_dir, companies, vacancy_records)
+
+
+def _write_vault(
+    output_dir: Path,
+    companies: dict[int, dict[str, object]],
+    vacancy_records: list[dict[str, object]],
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for info in companies.values():
+        company_dir = output_dir / str(info["slug"])
+        company_dir.mkdir(parents=True, exist_ok=True)
+        company_model = Company(
+            slug=str(info["slug"]),
+            name=str(info["name"]),
+            domains=[str(info["domain"])],
+            recruiters=list(info["recruiters"]),  # type: ignore[arg-type]
+        )
+        metadata = company_model.model_dump(mode="json", exclude_none=True)
+        (company_dir / "_company.md").write_text(
+            frontmatter.serialize(metadata, ""), encoding="utf-8"
+        )
+
+    for record in vacancy_records:
+        info = companies[record["company_index"]]  # type: ignore[index]
+        vacancy: Vacancy = record["vacancy"]  # type: ignore[assignment]
+        vacancy_dir = output_dir / str(info["slug"]) / vacancy.id
+        vacancy_dir.mkdir(parents=True, exist_ok=True)
+
+        metadata = vacancy.model_dump(
+            mode="json", exclude={"role_is_placeholder"}, exclude_none=True
+        )
+        body = f"# {vacancy.role} at {vacancy.company}\n"
+        (vacancy_dir / "vacancy.md").write_text(
+            frontmatter.serialize(metadata, body), encoding="utf-8"
+        )
+
+        docs_dir = vacancy_dir / "documents"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        for doc_record in record["documents"]:  # type: ignore[union-attr]
+            document: Document = doc_record["document"]
+            doc_metadata = document.model_dump(mode="json", exclude_none=True)
+            (docs_dir / f"{document.id}.md").write_text(
+                frontmatter.serialize(doc_metadata, doc_record["body"]),
+                encoding="utf-8",
+            )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--seed", type=int, default=20260101)
+    parser.add_argument("--output", type=Path, default=Path(__file__).parent / "vault")
+    args = parser.parse_args()
+    generate_vault(args.output, seed=args.seed)
+
+
+if __name__ == "__main__":
+    main()
