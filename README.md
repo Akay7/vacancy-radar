@@ -6,7 +6,8 @@ server exposes read/write tools to any LLM client.
 
 ## Status
 
-Early scaffolding. No vault, index, or MCP server yet.
+Vault, index, retrieval, CLI (read and write), and MCP server are all
+implemented. Stage 9 (xlsx import/migration) is not.
 
 ## Install
 
@@ -47,13 +48,14 @@ uv run vacancy-radar doctor
 
 `note`, `status set`, `add`, `new`, and `reindex` write to the vault.
 Every write is append-only or a validated status transition (see
-`openspec/changes/cli-write/design.md`) - nothing here deletes or
-overwrites existing content, and there is no delete command anywhere in
-the CLI. `note`, `status set`, and `add` accept a vacancy by id, company
-name, or unambiguous fuzzy match, resolved the same way `show` resolves
-its argument; an ambiguous match prints the candidates and exits
-non-zero without writing anything. `--json` follows the same stable,
-documented-shape convention as the read commands above.
+`openspec/changes/archive/2026-08-06-cli-write/design.md`) - nothing
+here deletes or overwrites existing content, and there is no delete
+command anywhere in the CLI. `note`, `status set`, and `add` accept a
+vacancy by id, company name, or unambiguous fuzzy match, resolved the
+same way `show` resolves its argument; an ambiguous match prints the
+candidates and exits non-zero without writing anything. `--json`
+follows the same stable, documented-shape convention as the read
+commands above.
 
 ```bash
 # A vacancy argument is an id, a company name/slug (if it resolves to
@@ -88,6 +90,63 @@ uv run vacancy-radar new --company "Acme Corp" --role "Backend Engineer" \
 # eagerly, before returning, so it's searchable immediately.
 uv run vacancy-radar reindex
 ```
+
+## MCP server
+
+`vacancy-radar-mcp` exposes the same `core.py` functions the CLI above
+calls, as MCP tools/resources/prompts over stdio, for any MCP client
+(Claude Desktop, etc.) - see `openspec/changes/mcp-server/design.md`
+for the full rationale.
+
+```bash
+uv run vacancy-radar-mcp --vault /path/to/vault
+```
+
+**Vault path**: `--vault` if given, else the `VAULT_PATH` environment
+variable; neither present fails startup naming both. MCP's client-
+supplied-roots capability is deliberately not used here - it is
+deprecated as of the protocol revision the MCP Python SDK speaks by
+default (2026-07-28, SEP-2577), so `--vault`/`VAULT_PATH` are the only
+two ways to point the server at a vault, exactly like configuring any
+other stdio MCP server.
+
+**Nine tools**, matching `core.py`'s functions one for one - argument
+marshalling only, no filtering/sorting/business logic of its own:
+
+| tool | delegates to |
+| ---- | ------------- |
+| `list_vacancies` | `core.list_vacancies` |
+| `get_company` | `core.get_company` |
+| `get_vacancy` | `core.get_vacancy` |
+| `search` | `core.search` |
+| `read_document` | `core.read_document` |
+| `resolve` | `core.resolve` |
+| `append_note` | `core.append_note` |
+| `set_status` | `core.set_status` |
+| `add_document` | `core.add_document` |
+
+`reindex` and `create_vacancy` are deliberately **not** exposed - bulk
+and structural operations stay at the CLI, where a human reviews the
+outcome (design.md's exposure decision). `search`'s description tells
+the model to prefer `mode="keyword"` for exact-name/proper-noun
+queries and leave `mode` unset (hybrid) otherwise, citing the measured
+numbers in "Retrieval evaluation" below - without that guidance a model
+defaults to hybrid for everything and the per-category tuning goes
+unused. A typed `core.py` error (an ambiguous match, an invalid status
+transition, a nonexistent vacancy) surfaces as a structured tool result
+the calling model can read and act on, never a raw crash.
+
+**Two resources**: `vacancy-radar://companies` (every company's slug,
+display name, and vacancy count) and `vacancy-radar://statuses` (every
+status and the transitions permitted from it, read live from
+`models.py`).
+
+**Three prompts**: `prep_interview(company)` (dossier, postings, prior
+notes, take-homes), `draft_reply(vacancy_id)` (prior correspondence, to
+match tone), and `weekly_review()` (stale applications, pending
+take-homes, vacancies tagged `needs_review`). An unresolved or
+ambiguous `company`/`vacancy_id` returns a message saying so - never a
+fabricated dossier.
 
 ## Development
 
