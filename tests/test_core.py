@@ -8,7 +8,14 @@ from vacancy_radar.index import search as index_search
 from vacancy_radar.index.build import build_index
 from vacancy_radar.index.search import SearchMode
 from vacancy_radar.index.store import default_index_path, get_index_handle
-from vacancy_radar.models import Company, Document, DocumentKind, Status, Vacancy
+from vacancy_radar.models import (
+    UNKNOWN_ROLE,
+    Company,
+    Document,
+    DocumentKind,
+    Status,
+    Vacancy,
+)
 from vacancy_radar.vault.paths import VAULT_MARKER_DIRNAME
 from vacancy_radar.vault.reader import VaultSnapshot, read_vault
 
@@ -596,3 +603,859 @@ def test_core_search_does_not_raise_when_stale(tmp_path: Path) -> None:
     )
 
     core.search("Note", vault=vault, mode=SearchMode.KEYWORD, limit=5)  # must not raise
+
+
+# --- Section 3 (stage 7 write half): atomic write / filename derivation ----
+
+
+def test_atomic_write_creates_file_with_exact_content_and_no_temp_left(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "a.md"
+
+    core._atomic_write(target, "hello", overwrite=False)  # noqa: SLF001
+
+    assert target.read_text(encoding="utf-8") == "hello"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_atomic_write_overwrite_false_refuses_an_existing_path(tmp_path: Path) -> None:
+    target = tmp_path / "a.md"
+    target.write_text("original", encoding="utf-8")
+
+    with pytest.raises(core.DocumentAlreadyExistsError):
+        core._atomic_write(target, "new", overwrite=False)  # noqa: SLF001
+
+    assert target.read_text(encoding="utf-8") == "original"
+
+
+def test_atomic_write_overwrite_true_replaces_existing_content(tmp_path: Path) -> None:
+    target = tmp_path / "vacancy.md"
+    target.write_text("original", encoding="utf-8")
+
+    core._atomic_write(target, "updated", overwrite=True)  # noqa: SLF001
+
+    assert target.read_text(encoding="utf-8") == "updated"
+
+
+_SIMULATED_REPLACE_FAILURE = "simulated replace failure"
+
+
+def test_atomic_write_new_file_failure_leaves_target_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "a.md"
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError(_SIMULATED_REPLACE_FAILURE)
+
+    monkeypatch.setattr(core.os, "replace", _boom)
+
+    with pytest.raises(OSError, match=_SIMULATED_REPLACE_FAILURE):
+        core._atomic_write(target, "hello", overwrite=False)  # noqa: SLF001
+
+    assert not target.exists()
+    # The temp file is cleaned up on a caught failure; nothing is left
+    # behind at all (a stronger guarantee than "dot-prefixed and
+    # invisible", which is the fallback for an uncatchable crash - see
+    # design.md decision 9's risk note).
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_atomic_write_update_failure_leaves_prior_content_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "vacancy.md"
+    target.write_text("original", encoding="utf-8")
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError(_SIMULATED_REPLACE_FAILURE)
+
+    monkeypatch.setattr(core.os, "replace", _boom)
+
+    with pytest.raises(OSError, match=_SIMULATED_REPLACE_FAILURE):
+        core._atomic_write(target, "updated", overwrite=True)  # noqa: SLF001
+
+    assert target.read_text(encoding="utf-8") == "original"
+
+
+def test_ensure_within_vault_raises_for_path_outside_vault(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    outside = tmp_path / "outside.md"
+
+    with pytest.raises(core.PathOutsideVaultError):
+        core._ensure_within_vault(vault, outside)  # noqa: SLF001
+
+
+def test_ensure_within_vault_does_not_raise_for_contained_path(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    inside = vault / "acme" / "v1" / "documents" / "note.md"
+    inside.parent.mkdir(parents=True)
+
+    core._ensure_within_vault(vault, inside)  # noqa: SLF001 - must not raise
+
+
+def test_derive_document_filename_uses_date_kind_and_slugified_title(
+    tmp_path: Path,
+) -> None:
+    name = core._derive_document_filename(  # noqa: SLF001
+        tmp_path, date(2026, 1, 2), DocumentKind.EMAIL, "Recruiter Follow-Up!"
+    )
+
+    assert name == "2026-01-02-email-recruiter-follow-up.md"
+
+
+def test_derive_document_filename_suffixes_on_collision(tmp_path: Path) -> None:
+    base = "2026-01-02-note-note"
+    (tmp_path / f"{base}.md").write_text("x", encoding="utf-8")
+
+    name = core._derive_document_filename(  # noqa: SLF001
+        tmp_path, date(2026, 1, 2), DocumentKind.NOTE, "Note"
+    )
+
+    assert name == f"{base}-2.md"
+
+
+def test_derive_document_filename_second_collision_uses_next_suffix(
+    tmp_path: Path,
+) -> None:
+    base = "2026-01-02-note-note"
+    (tmp_path / f"{base}.md").write_text("x", encoding="utf-8")
+    (tmp_path / f"{base}-2.md").write_text("x", encoding="utf-8")
+
+    name = core._derive_document_filename(  # noqa: SLF001
+        tmp_path, date(2026, 1, 2), DocumentKind.NOTE, "Note"
+    )
+
+    assert name == f"{base}-3.md"
+
+
+def test_derive_document_filename_title_with_path_separators_stays_safe(
+    tmp_path: Path,
+) -> None:
+    name = core._derive_document_filename(  # noqa: SLF001
+        tmp_path, date(2026, 1, 2), DocumentKind.EMAIL, "../../etc/passwd"
+    )
+
+    assert "/" not in name
+    assert ".." not in name
+    assert (tmp_path / name).resolve().parent == tmp_path.resolve()
+
+
+def test_derive_document_filename_blank_title_falls_back_to_untitled(
+    tmp_path: Path,
+) -> None:
+    name = core._derive_document_filename(  # noqa: SLF001
+        tmp_path, date(2026, 1, 2), DocumentKind.NOTE, "..."
+    )
+
+    assert name == "2026-01-02-note-untitled.md"
+
+
+def test_derive_document_filename_raises_when_suffix_attempts_exhausted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(core, "_MAX_FILENAME_SUFFIX_ATTEMPTS", 3)
+    base = "2026-01-02-note-note"
+    for name in (f"{base}.md", f"{base}-2.md", f"{base}-3.md"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+
+    with pytest.raises(core.DocumentAlreadyExistsError):
+        core._derive_document_filename(  # noqa: SLF001
+            tmp_path, date(2026, 1, 2), DocumentKind.NOTE, "Note"
+        )
+
+
+# --- Section 7 (stage 7 write half): reindex() ------------------------------
+
+
+@pytest.mark.embedding
+def test_reindex_against_an_already_fresh_index_reports_nothing_changed(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    build_index(read_vault(vault), default_index_path(vault))
+
+    report = core.reindex(vault=vault)
+
+    assert report.added == 0
+    assert report.changed == 0
+    assert report.deleted == 0
+
+
+@pytest.mark.embedding
+def test_reindex_force_reembeds_every_row(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    build_index(read_vault(vault), default_index_path(vault))
+
+    report = core.reindex(force=True, vault=vault)
+
+    assert report.changed + report.added > 0
+    assert report.unchanged == 0
+
+
+@pytest.mark.embedding
+def test_reindex_picks_up_a_vault_change_made_outside_core(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    build_index(read_vault(vault), default_index_path(vault))
+
+    _write_document(
+        vault / "tiny-corp" / "v1",
+        Document(
+            id="v1-doc2",
+            vacancy_id="v1",
+            kind=DocumentKind.NOTE,
+            title="New note",
+            date=date(2026, 1, 9),
+        ),
+    )
+
+    report = core.reindex(vault=vault)
+
+    assert report.added == 1
+
+
+# --- Section 4 (stage 7 write half): add_document() -------------------------
+
+
+def test_add_document_creates_a_file_at_the_derived_path(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+
+    path = core.add_document(
+        "v1",
+        DocumentKind.EMAIL,
+        "Hello from a recruiter.",
+        "Recruiter Email",
+        date(2026, 1, 5),
+        vault=vault,
+    )
+
+    assert path.is_file()
+    assert path.parent == vault / "tiny-corp" / "v1" / "documents"
+    assert path.name == "2026-01-05-email-recruiter-email.md"
+    _, body = frontmatter.parse(path.read_text(encoding="utf-8"))
+    assert body == "Hello from a recruiter."
+
+
+def test_add_document_raises_when_suffix_attempts_exhausted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    monkeypatch.setattr(core, "_MAX_FILENAME_SUFFIX_ATTEMPTS", 1)
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    for name in (
+        "2026-01-05-email-recruiter-email.md",
+        "2026-01-05-email-recruiter-email-2.md",
+    ):
+        (docs_dir / name).write_text("x", encoding="utf-8")
+    before = sorted(p.name for p in docs_dir.iterdir())
+
+    with pytest.raises(core.DocumentAlreadyExistsError):
+        core.add_document(
+            "v1",
+            DocumentKind.EMAIL,
+            "content",
+            "Recruiter Email",
+            date(2026, 1, 5),
+            vault=vault,
+        )
+
+    assert sorted(p.name for p in docs_dir.iterdir()) == before
+
+
+def test_add_document_external_id_dedupe_returns_existing_path_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    first = core.add_document(
+        "v1",
+        DocumentKind.EMAIL,
+        "Thread body.",
+        "Thread",
+        date(2026, 1, 5),
+        external_id="thread-123",
+        vault=vault,
+    )
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    before = sorted(p.name for p in docs_dir.iterdir())
+
+    second = core.add_document(
+        "v1",
+        DocumentKind.EMAIL,
+        "Thread body, quoted differently this time.",
+        "Thread",
+        date(2026, 1, 5),
+        external_id="thread-123",
+        vault=vault,
+    )
+
+    assert second == first
+    assert sorted(p.name for p in docs_dir.iterdir()) == before
+
+
+def test_add_document_different_external_id_creates_a_second_document(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    first = core.add_document(
+        "v1",
+        DocumentKind.EMAIL,
+        "Thread body.",
+        "Thread",
+        date(2026, 1, 5),
+        external_id="thread-123",
+        vault=vault,
+    )
+
+    second = core.add_document(
+        "v1",
+        DocumentKind.EMAIL,
+        "Thread body.",
+        "Thread",
+        date(2026, 1, 5),
+        external_id="thread-456",
+        vault=vault,
+    )
+
+    assert second != first
+    assert first.is_file()
+    assert second.is_file()
+
+
+@pytest.mark.embedding
+def test_add_document_is_searchable_without_a_separate_reindex(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    build_index(read_vault(vault), default_index_path(vault))
+
+    core.add_document(
+        "v1",
+        DocumentKind.EMAIL,
+        "A uniquely identifiable phrase about quantum widgets.",
+        "Quantum Widgets Email",
+        date(2026, 1, 5),
+        vault=vault,
+    )
+
+    results = core.search("quantum widgets", vault=vault, mode=SearchMode.KEYWORD)
+
+    assert any(h.kind == "email" for h in results.hits)
+
+
+def test_add_document_nonexistent_vacancy_id_raises_and_creates_no_file(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    before = sorted(p.name for p in docs_dir.iterdir())
+
+    with pytest.raises(core.EntityNotFoundError):
+        core.add_document(
+            "does-not-exist",
+            DocumentKind.EMAIL,
+            "content",
+            "Title",
+            date(2026, 1, 5),
+            vault=vault,
+        )
+
+    assert sorted(p.name for p in docs_dir.iterdir()) == before
+
+
+# --- Section 5 (stage 7 write half): append_note() --------------------------
+
+
+def test_append_note_creates_a_file_whose_body_equals_the_given_text(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+
+    path = core.append_note("v1", "Called the recruiter today.", vault=vault)
+
+    assert path.is_file()
+    _, body = frontmatter.parse(path.read_text(encoding="utf-8"))
+    assert body == "Called the recruiter today."
+
+
+def test_append_note_second_call_creates_new_file_leaving_first_unchanged(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+
+    first = core.append_note("v1", "First note.", date=date(2026, 2, 1), vault=vault)
+    first_bytes_before = first.read_bytes()
+
+    second = core.append_note("v1", "Second note.", date=date(2026, 2, 2), vault=vault)
+
+    assert second != first
+    assert first.read_bytes() == first_bytes_before
+
+
+def test_append_note_two_notes_same_date_produce_two_distinct_files(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+
+    first = core.append_note("v1", "Morning note.", date=date(2026, 2, 1), vault=vault)
+    second = core.append_note("v1", "Evening note.", date=date(2026, 2, 1), vault=vault)
+
+    assert first != second
+    assert first.is_file()
+    assert second.is_file()
+    _, first_body = frontmatter.parse(first.read_text(encoding="utf-8"))
+    _, second_body = frontmatter.parse(second.read_text(encoding="utf-8"))
+    assert first_body == "Morning note."
+    assert second_body == "Evening note."
+
+
+@pytest.mark.embedding
+def test_append_note_is_searchable_without_a_separate_reindex(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    build_index(read_vault(vault), default_index_path(vault))
+
+    core.append_note(
+        "v1", "A uniquely identifiable phrase about zebra migrations.", vault=vault
+    )
+
+    results = core.search("zebra migrations", vault=vault, mode=SearchMode.KEYWORD)
+
+    assert any(h.kind == "note" for h in results.hits)
+
+
+# --- Section 6 (stage 7 write half): set_status() ---------------------------
+
+
+def _applied_vacancy(vault: Path, vacancy_id: str = "v2", **overrides: object) -> Path:
+    fields: dict[str, object] = {
+        "status": Status.APPLIED,
+        "applied_date": date(2026, 1, 3),
+    }
+    fields.update(overrides)
+    return _write_vacancy(
+        vault, "tiny-corp", vacancy_id, _simple_vacancy(vacancy_id, **fields)
+    )
+
+
+def test_set_status_permitted_forward_transition_succeeds(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+
+    change = core.set_status("v2", "screening", vault=vault)
+
+    assert change.changed is True
+    assert change.old_status == Status.APPLIED
+    assert change.new_status == Status.SCREENING
+    updated = read_vault(vault).vacancies["v2"]
+    assert updated.status == Status.SCREENING
+
+
+def test_set_status_backward_without_force_raises_naming_both_statuses(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, status=Status.INTERVIEW, applied_date=date(2026, 1, 3))
+
+    with pytest.raises(core.InvalidStatusTransitionError) as exc_info:
+        core.set_status("v2", "applied", vault=vault)
+
+    message = str(exc_info.value)
+    assert "interview" in message
+    assert "applied" in message
+    assert read_vault(vault).vacancies["v2"].status == Status.INTERVIEW
+
+
+def test_set_status_backward_with_force_succeeds(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, status=Status.INTERVIEW, applied_date=date(2026, 1, 3))
+
+    change = core.set_status("v2", "applied", force=True, vault=vault)
+
+    assert change.changed is True
+    assert read_vault(vault).vacancies["v2"].status == Status.APPLIED
+
+
+def test_set_status_same_status_is_a_no_op(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, status=Status.SCREENING, applied_date=date(2026, 1, 3))
+    vacancy_path = vault / "tiny-corp" / "v2" / "vacancy.md"
+    before = vacancy_path.read_bytes()
+
+    change = core.set_status("v2", "screening", vault=vault)
+
+    assert change.changed is False
+    assert change.old_status == change.new_status == Status.SCREENING
+    assert vacancy_path.read_bytes() == before
+
+
+def test_set_status_invalid_status_string_lists_permitted_values(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+
+    with pytest.raises(core.InvalidStatusValueError) as exc_info:
+        core.set_status("v2", "intervew", vault=vault)
+
+    message = str(exc_info.value)
+    for status in Status:
+        assert status.value in message
+
+
+def test_set_status_appends_history_and_preserves_prior_entries(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+
+    core.set_status("v2", "screening", vault=vault)
+    core.set_status("v2", "interview", vault=vault)
+
+    vacancy_path = vault / "tiny-corp" / "v2" / "vacancy.md"
+    _, body = frontmatter.parse(vacancy_path.read_text(encoding="utf-8"))
+    assert "applied -> screening" in body
+    assert "screening -> interview" in body
+    assert body.index("applied -> screening") < body.index("screening -> interview")
+
+
+def test_set_status_leaves_stage_note_byte_identical(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, stage_note="Waiting to hear back from the recruiter.")
+
+    core.set_status("v2", "screening", vault=vault)
+
+    updated = read_vault(vault).vacancies["v2"]
+    assert updated.stage_note == "Waiting to hear back from the recruiter."
+
+
+def test_set_status_off_found_without_applied_date_raises(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    # v1 (from _minimal_built_vault) is status=found, applied_date=None.
+
+    with pytest.raises(core.MissingAppliedDateError):
+        core.set_status("v1", "applied", vault=vault)
+
+    assert read_vault(vault).vacancies["v1"].status == Status.FOUND
+
+
+def test_set_status_off_found_with_applied_date_succeeds(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+
+    change = core.set_status(
+        "v1", "applied", applied_date=date(2026, 1, 10), vault=vault
+    )
+
+    assert change.changed is True
+    updated = read_vault(vault).vacancies["v1"]
+    assert updated.status == Status.APPLIED
+    assert updated.applied_date == date(2026, 1, 10)
+
+
+def test_set_status_round_trip_differs_only_in_status_and_history(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, recruiter="Jane Recruiter", tags=["needs_review"])
+    vacancy_path = vault / "tiny-corp" / "v2" / "vacancy.md"
+    before_lines = vacancy_path.read_text(encoding="utf-8").splitlines()
+
+    core.set_status("v2", "screening", vault=vault)
+
+    after_lines = vacancy_path.read_text(encoding="utf-8").splitlines()
+    before_set = set(before_lines)
+    after_set = set(after_lines)
+    changed_or_added = before_set ^ after_set
+    for line in changed_or_added:
+        assert line.startswith(("status:", "- ")) or line in ("## Status History", "")
+
+
+@pytest.mark.embedding
+def test_set_status_updates_document_status_without_reembedding_vectors(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    _write_document(
+        vault / "tiny-corp" / "v2",
+        Document(
+            id="v2-doc1",
+            vacancy_id="v2",
+            kind=DocumentKind.EMAIL,
+            title="Recruiter Email",
+            date=date(2026, 1, 3),
+        ),
+        body="Some recruiter email body.",
+    )
+    build_index(read_vault(vault), default_index_path(vault))
+    index = get_index_handle(vault)
+    before_table = index.connection.open_table("documents")
+    before = before_table.search().where("doc_id = 'v2-doc1'").to_arrow().to_pylist()[0]
+
+    core.set_status("v2", "screening", vault=vault)
+
+    # Reopen the table (mirrors index.search.search's own pattern) so this
+    # reads the post-write state rather than a pre-write table snapshot.
+    after_table = index.connection.open_table("documents")
+    after = after_table.search().where("doc_id = 'v2-doc1'").to_arrow().to_pylist()[0]
+    assert after["status"] == "screening"
+    assert after["vector"] == before["vector"]
+
+
+def test_set_status_nonexistent_vacancy_id_raises(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+
+    with pytest.raises(core.EntityNotFoundError):
+        core.set_status("does-not-exist", "applied", vault=vault)
+
+
+# --- Section 8 (stage 7 write half): create_vacancy() -----------------------
+
+
+def test_create_vacancy_new_company_creates_directory_and_company_md(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    path = core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        "https://jobs.acme.example/1",
+        date(2026, 1, 1),
+        Status.FOUND,
+        vault=vault,
+    )
+
+    assert path.is_file()
+    assert (vault / "acme-corp" / "_company.md").is_file()
+    assert path.parent.parent == vault / "acme-corp"
+
+
+def test_create_vacancy_existing_company_leaves_company_md_untouched(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        "https://jobs.acme.example/1",
+        date(2026, 1, 1),
+        Status.FOUND,
+        vault=vault,
+    )
+    company_md = vault / "acme-corp" / "_company.md"
+    before = company_md.read_bytes()
+
+    second_path = core.create_vacancy(
+        "Acme Corp",
+        "Designer",
+        "https://jobs.acme.example/2",
+        date(2026, 1, 2),
+        Status.FOUND,
+        vault=vault,
+    )
+
+    assert company_md.read_bytes() == before
+    assert second_path.is_file()
+    snapshot = read_vault(vault)
+    roles = {v.role for v in snapshot.vacancies_for("acme-corp")}
+    assert roles == {"Engineer", "Designer"}
+
+
+def test_create_vacancy_collision_gets_a_distinct_suffixed_id(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    first = core.create_vacancy(
+        "Acme Corp",
+        UNKNOWN_ROLE,
+        "https://jobs.acme.example/1",
+        date(2026, 1, 1),
+        Status.FOUND,
+        vault=vault,
+    )
+    second = core.create_vacancy(
+        "Acme Corp",
+        UNKNOWN_ROLE,
+        "https://jobs.acme.example/2",
+        date(2026, 1, 1),
+        Status.FOUND,
+        vault=vault,
+    )
+
+    assert first != second
+    assert first.is_file()
+    assert second.is_file()
+    snapshot = read_vault(vault)
+    assert {v.id for v in snapshot.vacancies_for("acme-corp")} == {
+        first.parent.name,
+        second.parent.name,
+    }
+
+
+def test_create_vacancy_found_status_with_no_applied_date_succeeds(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    path = core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        "https://jobs.acme.example/1",
+        date(2026, 1, 1),
+        Status.FOUND,
+        vault=vault,
+    )
+
+    assert path.is_file()
+
+
+def test_create_vacancy_non_found_status_without_applied_date_raises(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    with pytest.raises(core.InvalidVacancyDataError):
+        core.create_vacancy(
+            "Acme Corp",
+            "Engineer",
+            "https://jobs.acme.example/1",
+            date(2026, 1, 1),
+            Status.APPLIED,
+            vault=vault,
+        )
+
+    snapshot = read_vault(vault)
+    assert snapshot.vacancies_for("acme-corp") == []
+
+
+def test_create_vacancy_invalid_status_string_raises_typed_error(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    with pytest.raises(core.InvalidVacancyDataError):
+        core.create_vacancy(
+            "Acme Corp",
+            "Engineer",
+            "https://jobs.acme.example/1",
+            date(2026, 1, 1),
+            "not-a-real-status",
+            vault=vault,
+        )
+
+    snapshot = read_vault(vault)
+    assert snapshot.vacancies_for("acme-corp") == []
+
+
+@pytest.mark.embedding
+def test_create_vacancy_is_listed_and_searchable_immediately(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    build_index(read_vault(vault), default_index_path(vault))
+
+    core.create_vacancy(
+        "Quokka Systems",
+        "Distributed Systems Engineer",
+        "https://jobs.quokka.example/1",
+        date(2026, 1, 1),
+        Status.FOUND,
+        vault=vault,
+    )
+
+    summaries = core.list_vacancies(vault=vault)
+    assert any(s.company == "Quokka Systems" for s in summaries)
+
+    results = core.search(
+        "Distributed Systems Engineer", vault=vault, mode=SearchMode.KEYWORD
+    )
+    assert any(h.company == "Quokka Systems" for h in results.hits)
+
+
+# --- Section 14: cross-cutting failure-atomicity tests -----------------
+
+
+def _snapshot_files(vault: Path) -> dict[str, bytes]:
+    return {
+        str(p.relative_to(vault)): p.read_bytes()
+        for p in vault.rglob("*")
+        if p.is_file()
+    }
+
+
+def _boom(*_args: object, **_kwargs: object) -> None:
+    raise OSError(_SIMULATED_REPLACE_FAILURE)
+
+
+def test_append_note_interrupted_write_leaves_vault_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    before = _snapshot_files(vault)
+
+    monkeypatch.setattr(core.os, "replace", _boom)
+
+    with pytest.raises(OSError, match=_SIMULATED_REPLACE_FAILURE):
+        core.append_note("v1", "text", vault=vault)
+
+    assert _snapshot_files(vault) == before
+
+
+def test_add_document_interrupted_write_leaves_vault_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    before = _snapshot_files(vault)
+
+    monkeypatch.setattr(core.os, "replace", _boom)
+
+    with pytest.raises(OSError, match=_SIMULATED_REPLACE_FAILURE):
+        core.add_document(
+            "v1", DocumentKind.EMAIL, "content", "Title", date(2026, 1, 5), vault=vault
+        )
+
+    assert _snapshot_files(vault) == before
+
+
+def test_set_status_interrupted_write_leaves_vault_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    before = _snapshot_files(vault)
+
+    monkeypatch.setattr(core.os, "replace", _boom)
+
+    with pytest.raises(OSError, match=_SIMULATED_REPLACE_FAILURE):
+        core.set_status("v2", "screening", vault=vault)
+
+    assert _snapshot_files(vault) == before
+
+
+def test_write_sequence_never_removes_a_preexisting_file(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    before = set(_snapshot_files(vault))
+
+    vacancy_path = core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        "https://jobs.acme.example/1",
+        date(2026, 1, 1),
+        Status.FOUND,
+        vault=vault,
+    )
+    vacancy_id = vacancy_path.parent.name
+    core.append_note(vacancy_id, "First note.", vault=vault)
+    core.set_status(vacancy_id, "applied", applied_date=date(2026, 1, 10), vault=vault)
+    core.add_document(
+        vacancy_id,
+        DocumentKind.EMAIL,
+        "Recruiter email body.",
+        "Recruiter Email",
+        date(2026, 1, 11),
+        vault=vault,
+    )
+
+    after = _snapshot_files(vault)
+    assert before <= set(after)

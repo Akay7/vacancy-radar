@@ -1,30 +1,58 @@
-"""Read-only business-logic entry points shared by the CLI (this stage)
-and, later, the MCP server (stage 8) - see design.md decision 1
-(invariant 4: every read a caller needs lives here exactly once, never
-duplicated inside a CLI command or an MCP tool).
+"""Business-logic entry points shared by the CLI and, later, the MCP
+server (stage 8) - see design.md decision 1 (invariant 4: every
+read/write a caller needs lives here exactly once, never duplicated
+inside a CLI command or an MCP tool).
 
 Every function resolves its own vault (an explicit `vault` argument, or
 `VAULT_PATH`, via `config.resolve_vault_path` - the same precedence
 `search()` and `doctor()` use) and reads it fresh via
-`vault.reader.read_vault`. Nothing here writes to the vault or the
-index; writes are stage 7.
+`vault.reader.read_vault`.
+
+The read half (`resolve`, `list_vacancies`, `get_company`,
+`get_vacancy`, `read_document`, `search`, `doctor`) never writes
+anything. The write half (`append_note`, `set_status`, `add_document`,
+`reindex`, `create_vacancy` - stage 7's `cli-write` change) is either
+strictly append-only at the filesystem level or a validated, typed-
+error-guarded update confined to `vacancy.md`'s frontmatter and its
+status-history block - invariant 3, enforced here in code. See
+`cli-write`'s design.md for the write half's decisions: derived
+filenames (never caller-supplied), `external_id` dedupe, eager
+reindex-on-write, the status graph as data in `models.py`, and the
+atomic-write strategy every write in this module goes through.
 """
 
 import difflib
+import os
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
+from vacancy_radar import frontmatter
 from vacancy_radar.config import resolve_vault_path
+from vacancy_radar.ids import new_vacancy_id, slugify
 from vacancy_radar.index import search as index_search
-from vacancy_radar.index.build import TABLE_NAME
+from vacancy_radar.index.build import TABLE_NAME, IndexReport, build_index
 from vacancy_radar.index.embed import DEFAULT_EMBEDDING_MODEL_NAME, vector_dim
 from vacancy_radar.index.store import IndexHandle, default_index_path, get_index_handle
-from vacancy_radar.models import DocumentKind, Status
-from vacancy_radar.vault.paths import is_within
+from vacancy_radar.models import (
+    STATUS_TRANSITIONS,
+    Company,
+    Document,
+    DocumentKind,
+    Status,
+    Vacancy,
+)
+from vacancy_radar.vault.paths import (
+    DOCUMENTS_DIRNAME,
+    company_dir,
+    company_markdown_path,
+    is_within,
+    vacancy_markdown_path,
+)
 from vacancy_radar.vault.reader import VaultSnapshot, read_vault
 
 DEFAULT_LIST_LIMIT = 50
@@ -631,3 +659,475 @@ def doctor(vault: Path | None = None) -> DoctorReport:
         embedding_model_error=model_error,
         vault_warnings=[w.message for w in snapshot.warnings],
     )
+
+
+# --- Writing: shared errors, atomic writes, filename derivation ------------
+
+
+class DocumentAlreadyExistsError(CoreError):
+    """Raised when a write would overwrite an existing vault file, or
+    when filename-collision suffixing exhausts its attempts without
+    finding a free path - append-only enforcement (invariant 3, see
+    design.md decisions 2 and 9)."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(f"{path} already exists and would not be overwritten")
+
+
+_TEMP_SUFFIX = ".tmp"
+
+
+def _atomic_write(path: Path, text: str, *, overwrite: bool) -> None:
+    """Write `text` to `path` atomically: a dot-prefixed temp file
+    created in `path`'s own directory, then `os.replace` (design.md
+    decision 9). A reader sees either the prior complete file or the
+    new complete file - never a truncated one - regardless of when a
+    failure happens.
+
+    `overwrite=False` is every new-file write's append-only guard: if
+    `path` already exists, this raises `DocumentAlreadyExistsError`
+    without creating a temp file or touching `path`. `overwrite=True`
+    is `set_status`'s sole, explicit exception (`vacancy.md`'s
+    frontmatter update) - it replaces `path`'s content but the write
+    is still atomic.
+    """
+    if not overwrite and path.exists():
+        raise DocumentAlreadyExistsError(path)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=_TEMP_SUFFIX, dir=path.parent
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        tmp_path.replace(path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _ensure_within_vault(vault: Path, path: Path) -> None:
+    """Defense in depth alongside filename derivation (design.md
+    decision 2): every write in this module checks this before
+    touching the filesystem, even though a derived path can't
+    lexically escape its target directory."""
+    if not is_within(vault, path):
+        raise PathOutsideVaultError(path)
+
+
+MAX_TITLE_SLUG_LENGTH = 60
+"""Mirrors `ids.MAX_ROLE_SLUG_LENGTH`'s role - keeps derived filenames
+readable in a file browser rather than one long run of hyphens."""
+
+_MAX_FILENAME_SUFFIX_ATTEMPTS = 500
+"""A derived filename that collides this many times in the same
+directory is treated as exhausted, not looped on forever."""
+
+
+def _derive_document_filename(
+    directory: Path, effective_date: date, kind: DocumentKind, title: str
+) -> str:
+    """A safe, derived `{date}-{kind}-{slug}.md` filename, collision-
+    suffixed against `directory`'s actual contents (design.md decision
+    2) - never a caller-supplied path. `ids.slugify` collapses `/`,
+    `\\`, and `..` runs in `title` to hyphens, so no title can steer
+    the result outside `directory`; `_ensure_within_vault` double-checks
+    the final path anyway."""
+    slug = slugify(title)[:MAX_TITLE_SLUG_LENGTH] or "untitled"
+    base = f"{effective_date.isoformat()}-{kind.value}-{slug}"
+
+    candidate = f"{base}.md"
+    if not (directory / candidate).exists():
+        return candidate
+
+    for suffix in range(2, _MAX_FILENAME_SUFFIX_ATTEMPTS + 1):
+        candidate = f"{base}-{suffix}.md"
+        if not (directory / candidate).exists():
+            return candidate
+
+    raise DocumentAlreadyExistsError(directory / f"{base}.md")
+
+
+# --- Writing: reindex() ------------------------------------------------
+
+
+def reindex(*, force: bool = False, vault: Path | None = None) -> IndexReport:
+    """Wrap stage 3's incremental `build_index` over a fresh
+    `VaultSnapshot` (design.md decision 4). Every write function below
+    calls this with `force=False` as its last step, before returning -
+    the same call `vacancy-radar reindex` makes directly. Cheap when
+    little changed: `build_index` diffs by content hash and re-embeds
+    only what's new or changed."""
+    vault_root = resolve_vault_path(vault)
+    index_path = default_index_path(vault_root)
+    return build_index(read_vault(vault_root), index_path, force=force)
+
+
+# --- Writing: add_document() ------------------------------------------
+
+
+def _document_by_external_id(
+    snapshot: VaultSnapshot, vacancy_id: str, external_id: str
+) -> Document | None:
+    for document in snapshot.documents_for(vacancy_id):
+        if document.external_id == external_id:
+            return document
+    return None
+
+
+def add_document(  # noqa: PLR0913, PLR0917 - the deliverable's public signature; each is meaningful
+    vacancy_id: str,
+    kind: DocumentKind,
+    content: str,
+    title: str,
+    date: date,
+    external_id: str | None = None,
+    *,
+    vault: Path | None = None,
+) -> Path:
+    """File a document into `vacancy_id`'s single, flat `documents/`
+    directory (design.md decision 1 - `kind` lives in frontmatter, not
+    in a subdirectory). The filename is derived from `date`, `kind`,
+    and `title` via `_derive_document_filename` - never from `content`
+    or a caller-supplied path (design.md decision 2, the safety
+    property stage 8 depends on). Refuses to overwrite an existing
+    path.
+
+    When `external_id` already matches a document filed under this
+    vacancy, returns that document's existing path and writes nothing
+    (design.md decision 3) - re-filing the same source is a no-op, not
+    a duplicate. Refreshes the index before returning (design.md
+    decision 4), so the filed document is immediately searchable.
+    """
+    vault_root = resolve_vault_path(vault)
+    snapshot = read_vault(vault_root)
+
+    if vacancy_id not in snapshot.vacancies:
+        raise EntityNotFoundError(vacancy_id)
+
+    if external_id is not None:
+        existing = _document_by_external_id(snapshot, vacancy_id, external_id)
+        if existing is not None:
+            return snapshot.document_paths[existing.id]
+
+    docs_dir = snapshot.vacancy_paths[vacancy_id].parent / DOCUMENTS_DIRNAME
+    filename = _derive_document_filename(docs_dir, date, kind, title)
+    target = docs_dir / filename
+    _ensure_within_vault(vault_root, target)
+
+    document = Document(
+        id=target.stem,
+        vacancy_id=vacancy_id,
+        kind=kind,
+        title=title,
+        date=date,
+        external_id=external_id,
+    )
+    metadata = document.model_dump(mode="json", exclude_none=True)
+    text = frontmatter.serialize(metadata, content)
+    _atomic_write(target, text, overwrite=False)
+
+    reindex(vault=vault_root)
+    return target
+
+
+# --- Writing: append_note() ---------------------------------------------
+
+NOTE_TITLE = "Note"
+"""`append_note`'s fixed, derived title (design.md decision 2) - a
+note's filename is never influenced by caller-supplied text."""
+
+
+def append_note(
+    vacancy_id: str, text: str, date: date | None = None, *, vault: Path | None = None
+) -> Path:
+    """Append a dated note to `vacancy_id`'s `documents/` directory.
+
+    A thin call into `add_document` with `kind=DocumentKind.NOTE`, a
+    fixed title, and `content=text` (design.md decision 2) - no
+    duplicated filename-derivation logic. Never overwrites an existing
+    note: a second note on the same day gets its own,
+    collision-suffixed file. `date` defaults to today's local calendar
+    day, matching `list_vacancies`'s `stale_days` convention.
+    """
+    effective_date = date if date is not None else datetime.now().astimezone().date()
+    return add_document(
+        vacancy_id, DocumentKind.NOTE, text, NOTE_TITLE, effective_date, vault=vault
+    )
+
+
+# --- Writing: set_status() ----------------------------------------------
+
+
+class InvalidStatusValueError(CoreError):
+    """Raised when `set_status`'s `new_status` doesn't parse as a
+    `Status` - names every permitted value."""
+
+    def __init__(self, value: object) -> None:
+        self.value = value
+        permitted = ", ".join(s.value for s in Status)
+        super().__init__(
+            f"{value!r} is not a valid status; permitted values: {permitted}"
+        )
+
+
+class InvalidStatusTransitionError(CoreError):
+    """Raised when a transition isn't in `models.STATUS_TRANSITIONS`
+    and `force` wasn't given - names both statuses (design.md decision
+    5)."""
+
+    def __init__(self, current: Status, requested: Status) -> None:
+        self.current = current
+        self.requested = requested
+        super().__init__(
+            f"cannot move from {current.value!r} to {requested.value!r} without force"
+        )
+
+
+class MissingAppliedDateError(CoreError):
+    """Raised when a transition moves a vacancy off `found` and it has
+    no `applied_date` yet, and none was given - the model's conditional
+    rule (models.py) surfaced as a typed, actionable error (design.md
+    decision 7)."""
+
+    def __init__(self, vacancy_id: str, target_status: Status) -> None:
+        self.vacancy_id = vacancy_id
+        self.target_status = target_status
+        super().__init__(
+            f"{vacancy_id!r} has no applied_date; moving it to "
+            f"{target_status.value!r} requires one"
+        )
+
+
+class InvalidVacancyDataError(CoreError):
+    """Raised when writing would produce a `vacancy.md` that fails
+    `Vacancy`'s own validation - wraps the underlying
+    `pydantic.ValidationError` rather than letting it escape raw."""
+
+    def __init__(self, vacancy_id: str, cause: Exception) -> None:
+        self.vacancy_id = vacancy_id
+        self.cause = cause
+        super().__init__(f"{vacancy_id!r}: invalid vacancy data: {cause}")
+
+
+@dataclass(frozen=True)
+class StatusChange:
+    """The outcome of one `set_status` call. `changed=False` marks the
+    same-status no-op - `old_status == new_status` in that case, and
+    nothing in the vault was written."""
+
+    vacancy_id: str
+    old_status: Status
+    new_status: Status
+    changed: bool
+    applied_date: date | None = None
+
+
+STATUS_HISTORY_HEADING = "## Status History"
+"""The status-history block's heading. Always the final section of
+`vacancy.md`'s body (design.md decision 6) - `set_status` only ever
+appends after it, never parses markdown section boundaries."""
+
+
+def _resolve_applied_date(
+    vacancy_id: str,
+    target_status: Status,
+    current_applied_date: date | None,
+    given_applied_date: date | None,
+) -> date | None:
+    if target_status is Status.FOUND:
+        # The model forbids applied_date when status is found - a
+        # forced backward transition to found always clears it.
+        return None
+    if given_applied_date is not None:
+        return given_applied_date
+    if current_applied_date is not None:
+        return current_applied_date
+    raise MissingAppliedDateError(vacancy_id, target_status)
+
+
+def _append_status_history(
+    body: str, old_status: Status, new_status: Status, note: str | None
+) -> str:
+    today = datetime.now().astimezone().date()
+    entry = f"- {today.isoformat()}: {old_status.value} -> {new_status.value}"
+    if note:
+        entry += f" ({note})"
+
+    if STATUS_HISTORY_HEADING in body:
+        return f"{body.rstrip(chr(10))}\n{entry}\n"
+
+    stripped = body.rstrip("\n")
+    prefix = f"{stripped}\n\n" if stripped else ""
+    return f"{prefix}{STATUS_HISTORY_HEADING}\n{entry}\n"
+
+
+def set_status(  # noqa: PLR0913 - the deliverable's public signature; each is meaningful
+    vacancy_id: str,
+    new_status: Status | str,
+    note: str | None = None,
+    applied_date: date | None = None,
+    *,
+    force: bool = False,
+    vault: Path | None = None,
+) -> StatusChange:
+    """Validate and apply a status transition, per `models.
+    STATUS_TRANSITIONS` (design.md decision 5).
+
+    A same-status call is always a no-op, regardless of `force`. A
+    transition not in the permitted graph raises unless `force=True`.
+    Moving a vacancy off `found` for the first time requires
+    `applied_date` (design.md decision 7) - explicitly, never guessed.
+    Writes `vacancy.md`'s frontmatter (`status`, and `applied_date` when
+    it changes) and appends to the status-history block, preserving
+    every other line byte-for-byte (design.md decision 6) - `stage_note`
+    is never touched. Refreshes the index before returning; that
+    vacancy's document rows get the new status without being
+    re-embedded (design.md decision 4).
+    """
+    vault_root = resolve_vault_path(vault)
+    snapshot = read_vault(vault_root)
+
+    if vacancy_id not in snapshot.vacancies:
+        raise EntityNotFoundError(vacancy_id)
+    vacancy = snapshot.vacancies[vacancy_id]
+
+    try:
+        target_status = Status(new_status)
+    except ValueError:
+        raise InvalidStatusValueError(new_status) from None
+
+    current_status = vacancy.status
+    if target_status == current_status:
+        return StatusChange(
+            vacancy_id=vacancy_id,
+            old_status=current_status,
+            new_status=current_status,
+            changed=False,
+            applied_date=vacancy.applied_date,
+        )
+
+    if not force and target_status not in STATUS_TRANSITIONS[current_status]:
+        raise InvalidStatusTransitionError(current_status, target_status)
+
+    effective_applied_date = _resolve_applied_date(
+        vacancy_id, target_status, vacancy.applied_date, applied_date
+    )
+
+    vacancy_path = snapshot.vacancy_paths[vacancy_id]
+    _ensure_within_vault(vault_root, vacancy_path)
+    original_text = vacancy_path.read_text(encoding="utf-8")
+    metadata, body = frontmatter.parse(original_text, filename=str(vacancy_path))
+
+    metadata["status"] = target_status.value
+    if effective_applied_date is None:
+        metadata.pop("applied_date", None)
+    else:
+        metadata["applied_date"] = effective_applied_date.isoformat()
+
+    try:
+        Vacancy(**metadata)
+    except ValidationError as exc:
+        raise InvalidVacancyDataError(vacancy_id, exc) from exc
+
+    new_body = _append_status_history(body, current_status, target_status, note)
+    new_text = frontmatter.serialize(metadata, new_body)
+    _atomic_write(vacancy_path, new_text, overwrite=True)
+
+    reindex(vault=vault_root)
+
+    return StatusChange(
+        vacancy_id=vacancy_id,
+        old_status=current_status,
+        new_status=target_status,
+        changed=True,
+        applied_date=effective_applied_date,
+    )
+
+
+# --- Writing: create_vacancy() ------------------------------------------
+
+
+def _existing_ids_for_collision_check(
+    snapshot: VaultSnapshot, company_directory: Path
+) -> set[str]:
+    """Every vacancy id `new_vacancy_id` must not collide with: the
+    snapshot's own ids, plus any subdirectory name already present
+    under the company's directory - belt-and-suspenders against a
+    vacancy directory that failed to parse (and so isn't in
+    `snapshot.vacancies`) but would still collide on disk."""
+    existing_ids = set(snapshot.vacancies)
+    if company_directory.is_dir():
+        existing_ids |= {p.name for p in company_directory.iterdir() if p.is_dir()}
+    return existing_ids
+
+
+def create_vacancy(  # noqa: PLR0913, PLR0917 - the deliverable's public signature; each is meaningful
+    company: str,
+    role: str,
+    source_url: str,
+    found_date: date,
+    status: Status | str,
+    applied_date: date | None = None,
+    *,
+    vault: Path | None = None,
+) -> Path:
+    """Create a new vacancy, minting its id via `ids.new_vacancy_id`
+    (colliding against both the vault's known ids and, defensively, any
+    raw subdirectory already on disk). Creates the company directory
+    and `_company.md` only when the derived slug has neither yet;
+    leaves an existing company's `_company.md` untouched (design.md
+    decision 8). Never overwrites anything - `new_vacancy_id`'s
+    suffixing means a second call with the same inputs mints a distinct
+    id, not a collision. Refreshes the index before returning."""
+    vault_root = resolve_vault_path(vault)
+    snapshot = read_vault(vault_root)
+
+    company_slug = slugify(company)
+    company_directory = company_dir(vault_root, company_slug)
+    company_md_path = company_markdown_path(vault_root, company_slug)
+
+    existing_ids = _existing_ids_for_collision_check(snapshot, company_directory)
+    vacancy_id = new_vacancy_id(found_date, company_slug, role, existing_ids)
+
+    try:
+        target_status = Status(status)
+        vacancy = Vacancy(
+            id=vacancy_id,
+            company=company,
+            company_slug=company_slug,
+            role=role,
+            source_url=source_url,
+            status=target_status,
+            found_date=found_date,
+            applied_date=applied_date,
+        )
+    except ValueError as exc:
+        # pydantic.ValidationError subclasses ValueError, so this catches
+        # both Status(status)'s invalid-value error and Vacancy's own
+        # field/model validation in one place.
+        raise InvalidVacancyDataError(vacancy_id, exc) from exc
+
+    if not company_md_path.exists():
+        _ensure_within_vault(vault_root, company_md_path)
+        company_record = Company(slug=company_slug, name=company)
+        company_metadata = company_record.model_dump(mode="json", exclude_none=True)
+        _atomic_write(
+            company_md_path,
+            frontmatter.serialize(company_metadata, ""),
+            overwrite=False,
+        )
+
+    vacancy_md_path = vacancy_markdown_path(vault_root, company_slug, vacancy_id)
+    _ensure_within_vault(vault_root, vacancy_md_path)
+    vacancy_metadata = vacancy.model_dump(
+        mode="json", exclude={"role_is_placeholder"}, exclude_none=True
+    )
+    vacancy_text = frontmatter.serialize(vacancy_metadata, f"# {vacancy.role}\n")
+    _atomic_write(vacancy_md_path, vacancy_text, overwrite=False)
+
+    reindex(vault=vault_root)
+    return vacancy_md_path

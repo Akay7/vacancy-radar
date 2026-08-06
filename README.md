@@ -21,10 +21,10 @@ uv run vacancy-radar --version
 ```
 
 `list`, `show`, `search`, and `doctor` are read-only: they never write to
-the vault or the index (writes land in a later stage). Every command
-prints a Rich table for humans by default; add `--json` for a machine-
-readable, stable, documented shape suitable for piping (see
-`openspec/changes/cli-read/design.md`'s `--json` contract).
+the vault or the index. Every command prints a Rich table for humans by
+default; add `--json` for a machine-readable, stable, documented shape
+suitable for piping (see `openspec/changes/archive/2026-08-06-cli-read/
+design.md`'s `--json` contract).
 
 ```bash
 # List vacancies, optionally filtered (--status, --company, --since,
@@ -41,6 +41,52 @@ uv run vacancy-radar search "backend engineer" --scores
 # Report vault and index health: marker, index freshness, embedding
 # model availability, and every warning collected while reading.
 uv run vacancy-radar doctor
+```
+
+### Writing
+
+`note`, `status set`, `add`, `new`, and `reindex` write to the vault.
+Every write is append-only or a validated status transition (see
+`openspec/changes/cli-write/design.md`) - nothing here deletes or
+overwrites existing content, and there is no delete command anywhere in
+the CLI. `note`, `status set`, and `add` accept a vacancy by id, company
+name, or unambiguous fuzzy match, resolved the same way `show` resolves
+its argument; an ambiguous match prints the candidates and exits
+non-zero without writing anything. `--json` follows the same stable,
+documented-shape convention as the read commands above.
+
+```bash
+# A vacancy argument is an id, a company name/slug (if it resolves to
+# exactly one vacancy), or an unambiguous fuzzy match - the same rule
+# `show` uses. A company with several vacancies needs the vacancy id.
+
+# Append a dated note. The filename is always derived from the date -
+# never something you (or an LLM, at a later stage) supply.
+uv run vacancy-radar note 2022-03-22-acme-corp-backend-engineer \
+    "Called the recruiter, no news yet."
+
+# Move a vacancy's status. Backward transitions need --force; the first
+# move off 'found' needs --applied-date.
+uv run vacancy-radar status set 2022-03-22-acme-corp-backend-engineer \
+    applied --applied-date 2026-01-15
+uv run vacancy-radar status set 2022-03-22-acme-corp-backend-engineer \
+    found --force
+
+# File a document (posting, email, note, or takehome) from a file or
+# stdin. --external-id makes re-filing the same source (e.g. the same
+# email thread) a no-op instead of a duplicate.
+uv run vacancy-radar add 2022-03-22-acme-corp-backend-engineer \
+    --kind email --title "Recruiter reply" --date 2026-01-16 \
+    --external-id gmail-thread-42 --stdin < email.txt
+
+# Create a new vacancy (and its company directory, if new).
+uv run vacancy-radar new --company "Acme Corp" --role "Backend Engineer" \
+    --url https://jobs.acme.example/1 --found-date 2026-01-10
+
+# Rebuild the index from the vault's current state. Not required for
+# ordinary use - every write above already reindexes its own effect
+# eagerly, before returning, so it's searchable immediately.
+uv run vacancy-radar reindex
 ```
 
 ## Development

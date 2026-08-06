@@ -41,6 +41,45 @@ class Status(StrEnum):
         return None
 
 
+_PIPELINE_ORDER: tuple[Status, ...] = (
+    Status.FOUND,
+    Status.APPLIED,
+    Status.SCREENING,
+    Status.TAKE_HOME,
+    Status.INTERVIEW,
+    Status.OFFER,
+)
+"""The active-pipeline order `STATUS_TRANSITIONS` is built from. Forward
+movement means "later in this tuple", not "the immediate next member"
+- a real pipeline skips `take_home` or jumps straight from `screening`
+to `offer` often enough that only requiring *some* later stage, not
+strictly the next one, is the useful rule."""
+
+TERMINAL_STATUSES: frozenset[Status] = frozenset({Status.REJECTED, Status.GHOSTED})
+"""Reachable, without `force`, from any active pipeline status - but
+having no un-forced follow-on status of their own (see
+`STATUS_TRANSITIONS`)."""
+
+
+def _build_status_transitions() -> "dict[Status, frozenset[Status]]":
+    transitions: dict[Status, frozenset[Status]] = {}
+    for index, status in enumerate(_PIPELINE_ORDER):
+        later_stages = frozenset(_PIPELINE_ORDER[index + 1 :])
+        transitions[status] = later_stages | TERMINAL_STATUSES
+    for status in TERMINAL_STATUSES:
+        transitions[status] = frozenset()
+    return transitions
+
+
+STATUS_TRANSITIONS: "dict[Status, frozenset[Status]]" = _build_status_transitions()
+"""The permitted status graph, as data - see design.md decision 5.
+`STATUS_TRANSITIONS[current]` is the set of statuses reachable from
+`current` without `force`. `set_status` (core.py) does nothing more
+than look this up; no transition rule branches on status names inside
+that function. A same-status call is a no-op handled by `set_status`
+itself, not encoded here - no status maps to itself."""
+
+
 class DocumentKind(StrEnum):
     """The kind of document attached to a vacancy."""
 

@@ -16,7 +16,7 @@ from vacancy_radar.config import VaultNotConfiguredError, VaultNotFoundError
 from vacancy_radar.index.build import build_index
 from vacancy_radar.index.search import SearchError, SearchMode
 from vacancy_radar.index.store import default_index_path, get_index_handle
-from vacancy_radar.models import Status
+from vacancy_radar.models import DocumentKind, Status
 from vacancy_radar.vault.reader import read_vault
 
 app = typer.Typer()
@@ -106,6 +106,49 @@ def _json_default(value: object) -> object:
 def _print_json(payload: object) -> None:
     text = json.dumps(payload, indent=2, default=_json_default)
     console.print(text, markup=False, highlight=False, soft_wrap=True)
+
+
+def _parse_kind(value: str) -> DocumentKind:
+    try:
+        return DocumentKind(value)
+    except ValueError as exc:
+        error_console.print(f"Error: invalid --kind value: {exc}")
+        raise typer.Exit(code=1) from None
+
+
+def _resolve_vacancy_or_fail(query: str) -> str:
+    """Every write command that takes a vacancy argument resolves it
+    this way: `core.resolve`, branching only on which field came back
+    (mirrors `show_command`'s branching, design.md decision 1) - an
+    ambiguous or unresolved query prints and exits non-zero *before*
+    any write command goes on to call a `core.py` write function."""
+    try:
+        resolution = core.resolve(query)
+    except _CORE_ERRORS as exc:
+        _fail(exc)
+
+    if resolution.vacancy_id is not None:
+        return resolution.vacancy_id
+    if resolution.candidates:
+        _render_candidates(query, resolution.candidates)
+        raise typer.Exit(code=1)
+    if resolution.company_slug is not None:
+        error_console.print(f"Error: {query!r} resolved to a company, not a vacancy")
+        raise typer.Exit(code=1)
+    error_console.print(f"Error: nothing in the vault matches {query!r}")
+    raise typer.Exit(code=1)
+
+
+def _render_write_outcome(
+    path: Path, *, outcome: str, as_json: bool, extra: dict[str, object] | None = None
+) -> None:
+    if as_json:
+        payload: dict[str, object] = {"outcome": outcome, "path": str(path)}
+        if extra:
+            payload.update(extra)
+        _print_json(payload)
+    else:
+        console.print(f"{outcome}: {path}")
 
 
 # --- list --------------------------------------------------------------
@@ -451,3 +494,241 @@ def eval_command() -> None:
         report = run_eval(queries, index, FULL_SWEEP)
 
     typer.echo(report.to_markdown())
+
+
+# --- note ----------------------------------------------------------------
+
+
+@app.command("note")
+def note_command(
+    vacancy: Annotated[
+        str, typer.Argument(help="A vacancy id, company name, or fuzzy match.")
+    ],
+    text: Annotated[str, typer.Argument(help="The note text.")],
+    *,
+    date: Annotated[
+        str | None,
+        typer.Option("--date", help="ISO date for the note; defaults to today."),
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit JSON instead of plain output.")
+    ] = False,
+) -> None:
+    """Append a dated note to a vacancy."""
+    vacancy_id = _resolve_vacancy_or_fail(vacancy)
+    note_date = _parse_date_option(date, option="--date")
+
+    try:
+        path = core.append_note(vacancy_id, text, date=note_date)
+    except _CORE_ERRORS as exc:
+        _fail(exc)
+
+    _render_write_outcome(path, outcome="created", as_json=as_json)
+
+
+# --- status ----------------------------------------------------------------
+
+status_app = typer.Typer()
+app.add_typer(status_app, name="status", help="Inspect or change a vacancy's status.")
+
+
+@status_app.command("set")
+def status_set_command(  # noqa: PLR0913 - each option mirrors set_status's own signature
+    vacancy: Annotated[
+        str, typer.Argument(help="A vacancy id, company name, or fuzzy match.")
+    ],
+    status: Annotated[str, typer.Argument(help="The target status.")],
+    note: Annotated[
+        str | None,
+        typer.Option("--note", help="Recorded alongside the status-history entry."),
+    ] = None,
+    applied_date: Annotated[
+        str | None,
+        typer.Option(
+            "--applied-date",
+            help="Required the first time a vacancy moves off 'found'.",
+        ),
+    ] = None,
+    *,
+    force: Annotated[
+        bool, typer.Option("--force", help="Allow a backward transition.")
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit JSON instead of plain output.")
+    ] = False,
+) -> None:
+    """Set a vacancy's status, validating the transition."""
+    vacancy_id = _resolve_vacancy_or_fail(vacancy)
+    applied_date_value = _parse_date_option(applied_date, option="--applied-date")
+
+    try:
+        change = core.set_status(
+            vacancy_id,
+            status,
+            note=note,
+            applied_date=applied_date_value,
+            force=force,
+        )
+    except _CORE_ERRORS as exc:
+        _fail(exc)
+
+    if as_json:
+        _print_json(
+            {
+                "outcome": "changed" if change.changed else "unchanged",
+                "vacancy_id": change.vacancy_id,
+                "old_status": change.old_status.value,
+                "new_status": change.new_status.value,
+            }
+        )
+    elif change.changed:
+        console.print(
+            f"{change.vacancy_id}: "
+            f"{change.old_status.value} -> {change.new_status.value}"
+        )
+    else:
+        console.print(f"{change.vacancy_id}: unchanged ({change.new_status.value})")
+
+
+# --- add ---------------------------------------------------------------
+
+
+def _read_document_content(*, file: Path | None, stdin: bool) -> str:
+    if file is not None and stdin:
+        error_console.print("Error: pass either --file or --stdin, not both")
+        raise typer.Exit(code=1)
+    if file is not None:
+        return file.read_text(encoding="utf-8")
+    if stdin:
+        return sys.stdin.read()
+    error_console.print("Error: pass either --file or --stdin")
+    raise typer.Exit(code=1)
+
+
+def _document_count(vacancy_id: str) -> int:
+    try:
+        return len(core.get_vacancy(vacancy_id).documents)
+    except _CORE_ERRORS as exc:
+        _fail(exc)
+
+
+@app.command("add")
+def add_command(  # noqa: PLR0913 - each option mirrors add_document's own signature
+    vacancy: Annotated[
+        str, typer.Argument(help="A vacancy id, company name, or fuzzy match.")
+    ],
+    *,
+    kind: Annotated[
+        str, typer.Option("--kind", help="posting, email, note, or takehome.")
+    ],
+    title: Annotated[str, typer.Option("--title", help="The document's title.")],
+    date: Annotated[str, typer.Option("--date", help="ISO date for the document.")],
+    file: Annotated[
+        Path | None,
+        typer.Option(
+            "--file", help="Read content from this file.", exists=True, readable=True
+        ),
+    ] = None,
+    stdin: Annotated[
+        bool, typer.Option("--stdin", help="Read content from standard input.")
+    ] = False,
+    external_id: Annotated[
+        str | None,
+        typer.Option(
+            "--external-id", help="Dedupe key; re-filing the same id is a no-op."
+        ),
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit JSON instead of plain output.")
+    ] = False,
+) -> None:
+    """File a document under a vacancy. Content comes from --file or --stdin."""
+    vacancy_id = _resolve_vacancy_or_fail(vacancy)
+    kind_enum = _parse_kind(kind)
+    date_value = _parse_date_option(date, option="--date")
+    content = _read_document_content(file=file, stdin=stdin)
+
+    before_count = _document_count(vacancy_id)
+    try:
+        path = core.add_document(
+            vacancy_id, kind_enum, content, title, date_value, external_id
+        )
+    except _CORE_ERRORS as exc:
+        _fail(exc)
+    after_count = _document_count(vacancy_id)
+
+    outcome = "created" if after_count > before_count else "existing"
+    _render_write_outcome(path, outcome=outcome, as_json=as_json)
+
+
+# --- new ---------------------------------------------------------------
+
+
+@app.command("new")
+def new_command(  # noqa: PLR0913 - each option mirrors create_vacancy's own signature
+    *,
+    company: Annotated[
+        str, typer.Option("--company", help="The company's display name.")
+    ],
+    role: Annotated[str, typer.Option("--role", help="The role title.")],
+    url: Annotated[str, typer.Option("--url", help="The posting's source URL.")],
+    found_date: Annotated[
+        str, typer.Option("--found-date", help="ISO date the vacancy was found.")
+    ],
+    status: Annotated[
+        str, typer.Option("--status", help="Initial status; defaults to 'found'.")
+    ] = Status.FOUND.value,
+    applied_date: Annotated[
+        str | None,
+        typer.Option("--applied-date", help="Required when --status is not 'found'."),
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit JSON instead of plain output.")
+    ] = False,
+) -> None:
+    """Create a new vacancy, and its company directory if needed."""
+    found_date_value = _parse_date_option(found_date, option="--found-date")
+    applied_date_value = _parse_date_option(applied_date, option="--applied-date")
+
+    try:
+        path = core.create_vacancy(
+            company, role, url, found_date_value, status, applied_date_value
+        )
+    except _CORE_ERRORS as exc:
+        _fail(exc)
+
+    # The vacancy directory is named after its id (vault/paths.py's own
+    # convention, followed by create_vacancy) - reading it back off the
+    # returned path is a structural fact, not business logic.
+    vacancy_id = path.parent.name
+    _render_write_outcome(
+        path, outcome="created", as_json=as_json, extra={"id": vacancy_id}
+    )
+
+
+# --- reindex -----------------------------------------------------------
+
+
+@app.command("reindex")
+def reindex_command(
+    *,
+    force: Annotated[
+        bool, typer.Option("--force", help="Re-embed every row, not only changed ones.")
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit JSON instead of plain output.")
+    ] = False,
+) -> None:
+    """Rebuild the index from the vault's current state."""
+    try:
+        report = core.reindex(force=force)
+    except _CORE_ERRORS as exc:
+        _fail(exc)
+
+    if as_json:
+        _print_json(dataclasses.asdict(report))
+    else:
+        console.print(
+            f"added={report.added} changed={report.changed} deleted={report.deleted} "
+            f"unchanged={report.unchanged} skipped={report.skipped}"
+        )

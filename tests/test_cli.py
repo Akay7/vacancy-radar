@@ -94,6 +94,18 @@ def _simple_vacancy(
     return Vacancy(**fields)  # type: ignore[arg-type]
 
 
+def _minimal_vault(vault: Path) -> Path:
+    """A tiny hand-built vault (marker + one company + one vacancy) -
+    small and fast, unlike a copy of the full fixture vault. Mirrors
+    `tests/test_core.py`'s `_minimal_built_vault`; write-command tests
+    build their own index only when a test actually needs one (most
+    don't - they check exit code and file creation, not search)."""
+    _init_vault(vault)
+    _write_company(vault, "tiny-corp", "Tiny Corp")
+    _write_vacancy(vault, "tiny-corp", "v1", _simple_vacancy("v1"))
+    return vault
+
+
 @pytest.fixture(scope="module")
 def built_fixture_vault(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A copy of the committed fixture vault with a fresh index built
@@ -450,3 +462,521 @@ def test_eval_command_runs_the_full_sweep_and_prints_a_markdown_report() -> None
         result.output
     )
     assert "overall" in result.output
+
+
+# --- Section 9: note command -------------------------------------------
+
+
+def test_note_command_creates_one_note_file(tmp_path: Path) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app, ["note", "v1", "Called the recruiter."], env={"VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code == 0
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    assert list(docs_dir.iterdir())
+
+
+def test_note_command_ambiguous_query_exits_nonzero_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "widget-us", "Widget Inc")
+    _write_company(vault, "widget-eu", "Widget Inc")
+
+    result = runner.invoke(
+        app, ["note", "widget inc", "text"], env={"VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code != 0
+    assert "widget-us" in result.output or "widget-us" in result.stderr
+    assert not (vault / "widget-us").exists() or not any(
+        (vault / "widget-us").rglob("documents/*")
+    )
+    assert not (vault / "widget-eu").exists() or not any(
+        (vault / "widget-eu").rglob("documents/*")
+    )
+
+
+def test_note_command_json_names_the_created_path(tmp_path: Path) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        ["note", "v1", "Called the recruiter.", "--json"],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["outcome"] == "created"
+    assert Path(payload["path"]).is_file()
+
+
+# --- Section 10: status set command -------------------------------------
+
+
+def test_status_set_permitted_forward_transition_exits_zero(tmp_path: Path) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        ["status", "set", "v1", "applied", "--applied-date", "2026-01-05"],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    assert read_vault(vault).vacancies["v1"].status == Status.APPLIED
+
+
+def test_status_set_backward_without_force_exits_nonzero_names_both_statuses(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+    runner.invoke(
+        app,
+        ["status", "set", "v1", "applied", "--applied-date", "2026-01-05"],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    result = runner.invoke(
+        app, ["status", "set", "v1", "found"], env={"VAULT_PATH": str(vault)}
+    )
+    assert result.exit_code != 0
+    assert "applied" in result.output
+    assert "found" in result.output
+
+    forced = runner.invoke(
+        app, ["status", "set", "v1", "found", "--force"], env={"VAULT_PATH": str(vault)}
+    )
+    assert forced.exit_code == 0
+    assert read_vault(vault).vacancies["v1"].status == Status.FOUND
+
+
+def test_status_set_off_found_requires_applied_date_option(tmp_path: Path) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+
+    missing = runner.invoke(
+        app, ["status", "set", "v1", "applied"], env={"VAULT_PATH": str(vault)}
+    )
+    assert missing.exit_code != 0
+
+    given = runner.invoke(
+        app,
+        ["status", "set", "v1", "applied", "--applied-date", "2026-02-01"],
+        env={"VAULT_PATH": str(vault)},
+    )
+    assert given.exit_code == 0
+    assert read_vault(vault).vacancies["v1"].applied_date == date(2026, 2, 1)
+
+
+def test_status_set_ambiguous_query_exits_nonzero_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "widget-us", "Widget Inc")
+    _write_company(vault, "widget-eu", "Widget Inc")
+
+    result = runner.invoke(
+        app, ["status", "set", "widget inc", "applied"], env={"VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code != 0
+
+
+def test_status_set_json_same_status_reports_unchanged(tmp_path: Path) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app, ["status", "set", "v1", "found", "--json"], env={"VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["outcome"] == "unchanged"
+
+
+# --- Section 11: add command ---------------------------------------------
+
+
+def test_add_command_from_file_creates_a_document_with_matching_content(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+    source = tmp_path / "source.txt"
+    source.write_text("Email body from a file.", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "add",
+            "v1",
+            "--kind",
+            "email",
+            "--title",
+            "Recruiter Email",
+            "--date",
+            "2026-01-05",
+            "--file",
+            str(source),
+        ],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    created = next(docs_dir.glob("2026-01-05-email-*.md"))
+    _, body = frontmatter.parse(created.read_text(encoding="utf-8"))
+    assert body == "Email body from a file."
+
+
+def test_add_command_stdin_creates_a_document_with_piped_content(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        [
+            "add",
+            "v1",
+            "--kind",
+            "email",
+            "--title",
+            "Recruiter Email",
+            "--date",
+            "2026-01-05",
+            "--stdin",
+        ],
+        input="Email body from stdin.",
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    created = next(docs_dir.glob("2026-01-05-email-*.md"))
+    _, body = frontmatter.parse(created.read_text(encoding="utf-8"))
+    assert body == "Email body from stdin."
+
+
+def test_add_command_external_id_dedupe_reports_existing_and_creates_no_file(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+    args = [
+        "add",
+        "v1",
+        "--kind",
+        "email",
+        "--title",
+        "Thread",
+        "--date",
+        "2026-01-05",
+        "--external-id",
+        "thread-123",
+        "--stdin",
+    ]
+    first = runner.invoke(
+        app, [*args, "--json"], input="first pass", env={"VAULT_PATH": str(vault)}
+    )
+    assert first.exit_code == 0
+    first_payload = json.loads(first.output)
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    before = sorted(p.name for p in docs_dir.iterdir())
+
+    second = runner.invoke(
+        app, [*args, "--json"], input="second pass", env={"VAULT_PATH": str(vault)}
+    )
+
+    assert second.exit_code == 0
+    second_payload = json.loads(second.output)
+    assert second_payload["outcome"] == "existing"
+    assert second_payload["path"] == first_payload["path"]
+    assert sorted(p.name for p in docs_dir.iterdir()) == before
+
+
+def test_add_command_ambiguous_query_exits_nonzero_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "widget-us", "Widget Inc")
+    _write_company(vault, "widget-eu", "Widget Inc")
+
+    result = runner.invoke(
+        app,
+        [
+            "add",
+            "widget inc",
+            "--kind",
+            "email",
+            "--title",
+            "Thread",
+            "--date",
+            "2026-01-05",
+            "--stdin",
+        ],
+        input="body",
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code != 0
+
+
+def test_add_command_json_on_fresh_filing_names_created_path(tmp_path: Path) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        [
+            "add",
+            "v1",
+            "--kind",
+            "email",
+            "--title",
+            "Recruiter Email",
+            "--date",
+            "2026-01-05",
+            "--stdin",
+            "--json",
+        ],
+        input="body",
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["outcome"] == "created"
+    assert Path(payload["path"]).is_file()
+
+
+# --- Section 12: new command ----------------------------------------------
+
+
+def test_new_command_creates_vacancy_and_is_listed_afterward(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    result = runner.invoke(
+        app,
+        [
+            "new",
+            "--company",
+            "Acme Corp",
+            "--role",
+            "Engineer",
+            "--url",
+            "https://jobs.acme.example/1",
+            "--found-date",
+            "2026-01-01",
+        ],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    listing = runner.invoke(app, ["list", "--json"], env={"VAULT_PATH": str(vault)})
+    assert listing.exit_code == 0
+    rows = json.loads(listing.output)
+    assert any(row["company"] == "Acme Corp" for row in rows)
+
+
+def test_new_command_non_found_status_without_applied_date_exits_nonzero(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    result = runner.invoke(
+        app,
+        [
+            "new",
+            "--company",
+            "Acme Corp",
+            "--role",
+            "Engineer",
+            "--url",
+            "https://jobs.acme.example/1",
+            "--found-date",
+            "2026-01-01",
+            "--status",
+            "applied",
+        ],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code != 0
+
+    with_date = runner.invoke(
+        app,
+        [
+            "new",
+            "--company",
+            "Acme Corp",
+            "--role",
+            "Engineer",
+            "--url",
+            "https://jobs.acme.example/1",
+            "--found-date",
+            "2026-01-01",
+            "--status",
+            "applied",
+            "--applied-date",
+            "2026-01-05",
+        ],
+        env={"VAULT_PATH": str(vault)},
+    )
+    assert with_date.exit_code == 0
+
+
+def test_new_command_json_names_created_id_and_path(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    result = runner.invoke(
+        app,
+        [
+            "new",
+            "--company",
+            "Acme Corp",
+            "--role",
+            "Engineer",
+            "--url",
+            "https://jobs.acme.example/1",
+            "--found-date",
+            "2026-01-01",
+            "--json",
+        ],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["outcome"] == "created"
+    assert "id" in payload
+    assert Path(payload["path"]).is_file()
+
+
+# --- Section 13: reindex command -------------------------------------------
+
+
+def test_reindex_command_against_fresh_index_reports_zero_changes(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+    build_index(read_vault(vault), default_index_path(vault))
+
+    result = runner.invoke(app, ["reindex"], env={"VAULT_PATH": str(vault)})
+
+    assert result.exit_code == 0
+    assert "added=0" in result.output
+    assert "changed=0" in result.output
+
+
+def test_reindex_command_force_reports_every_row_reembedded(tmp_path: Path) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+    build_index(read_vault(vault), default_index_path(vault))
+
+    result = runner.invoke(app, ["reindex", "--force"], env={"VAULT_PATH": str(vault)})
+
+    assert result.exit_code == 0
+    assert "unchanged=0" in result.output
+
+
+def test_reindex_command_json_matches_index_report_fields(tmp_path: Path) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+    build_index(read_vault(vault), default_index_path(vault))
+
+    result = runner.invoke(app, ["reindex", "--json"], env={"VAULT_PATH": str(vault)})
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert set(payload) == {
+        "added",
+        "changed",
+        "deleted",
+        "unchanged",
+        "skipped",
+        "elapsed",
+        "warnings",
+    }
+
+
+# --- Section 14: cross-cutting write-command tests --------------------------
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["note", "does-not-exist", "text"],
+        ["status", "set", "does-not-exist", "applied"],
+        [
+            "add",
+            "does-not-exist",
+            "--kind",
+            "email",
+            "--title",
+            "T",
+            "--date",
+            "2026-01-01",
+            "--stdin",
+        ],
+        [
+            "new",
+            "--company",
+            "Acme",
+            "--role",
+            "Eng",
+            "--url",
+            "not-a-url",
+            "--found-date",
+            "2026-01-01",
+        ],
+    ],
+)
+def test_write_command_typed_error_exits_nonzero_and_creates_no_file(
+    tmp_path: Path, args: list[str]
+) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+    before = sorted(str(p.relative_to(vault)) for p in vault.rglob("*") if p.is_file())
+
+    result = runner.invoke(app, args, input="body", env={"VAULT_PATH": str(vault)})
+
+    assert result.exit_code != 0
+    after = sorted(str(p.relative_to(vault)) for p in vault.rglob("*") if p.is_file())
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["note", "does-not-exist", "text", "--json"],
+        ["status", "set", "does-not-exist", "applied", "--json"],
+        [
+            "add",
+            "does-not-exist",
+            "--kind",
+            "email",
+            "--title",
+            "T",
+            "--date",
+            "2026-01-01",
+            "--stdin",
+            "--json",
+        ],
+    ],
+)
+def test_write_command_json_error_case_emits_no_stdout_json(
+    tmp_path: Path, args: list[str]
+) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+
+    result = runner.invoke(app, args, input="body", env={"VAULT_PATH": str(vault)})
+
+    assert result.exit_code != 0
+    # The error path (_fail) never reaches _print_json - matches cli-read's
+    # existing convention (Error: ... on stderr, nothing structured on stdout).
+    assert result.stdout.strip() == ""

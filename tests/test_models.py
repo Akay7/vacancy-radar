@@ -4,6 +4,8 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from vacancy_radar.models import (
+    STATUS_TRANSITIONS,
+    TERMINAL_STATUSES,
     Company,
     Document,
     DocumentKind,
@@ -288,3 +290,50 @@ def test_company_constructs() -> None:
     assert company.slug == "acme-inc"
     assert company.domains == ["acme.example"]
     assert company.recruiters == ["Jane Recruiter"]
+
+
+# --- STATUS_TRANSITIONS (stage 7 write half, section 2) --------------------
+
+
+def test_status_transitions_has_an_entry_for_every_status() -> None:
+    assert set(STATUS_TRANSITIONS) == set(Status)
+
+
+def test_status_transitions_permits_every_later_pipeline_stage() -> None:
+    # found -> every later pipeline status, not only the immediate next one.
+    assert STATUS_TRANSITIONS[Status.FOUND] >= {
+        Status.APPLIED,
+        Status.SCREENING,
+        Status.TAKE_HOME,
+        Status.INTERVIEW,
+        Status.OFFER,
+    }
+    # screening -> offer skips take_home and interview - a real pipeline
+    # does this often enough that it must be permitted without force.
+    assert Status.OFFER in STATUS_TRANSITIONS[Status.SCREENING]
+
+
+def test_status_transitions_permits_terminal_statuses_from_any_active_state() -> None:
+    for status in (
+        Status.FOUND,
+        Status.APPLIED,
+        Status.SCREENING,
+        Status.TAKE_HOME,
+        Status.INTERVIEW,
+        Status.OFFER,
+    ):
+        assert Status.REJECTED in STATUS_TRANSITIONS[status]
+        assert Status.GHOSTED in STATUS_TRANSITIONS[status]
+
+
+def test_status_transitions_terminal_statuses_have_no_unforced_follow_on() -> None:
+    # offer is the last pipeline stage, so nothing later remains - but it
+    # still reaches rejected/ghosted, like every other active status.
+    assert STATUS_TRANSITIONS[Status.OFFER] == TERMINAL_STATUSES
+    assert STATUS_TRANSITIONS[Status.REJECTED] == frozenset()
+    assert STATUS_TRANSITIONS[Status.GHOSTED] == frozenset()
+
+
+def test_status_transitions_has_no_self_loops() -> None:
+    for status, reachable in STATUS_TRANSITIONS.items():
+        assert status not in reachable
