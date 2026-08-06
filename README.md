@@ -20,6 +20,29 @@ uv sync --all-groups
 uv run vacancy-radar --version
 ```
 
+`list`, `show`, `search`, and `doctor` are read-only: they never write to
+the vault or the index (writes land in a later stage). Every command
+prints a Rich table for humans by default; add `--json` for a machine-
+readable, stable, documented shape suitable for piping (see
+`openspec/changes/cli-read/design.md`'s `--json` contract).
+
+```bash
+# List vacancies, optionally filtered (--status, --company, --since,
+# --needs-review, --stale-days), sorted by last activity.
+uv run vacancy-radar list --status applied --status interview
+
+# Show one vacancy or company - which kind it is is auto-detected.
+uv run vacancy-radar show acme-corp
+
+# Search the vault's index (see "Retrieval evaluation" below);
+# --scores prints each hit's keyword/semantic rank and fused score.
+uv run vacancy-radar search "backend engineer" --scores
+
+# Report vault and index health: marker, index freshness, embedding
+# model availability, and every warning collected while reading.
+uv run vacancy-radar doctor
+```
+
 ## Development
 
 ```bash
@@ -48,8 +71,7 @@ uv run pre-commit run --all-files
 Measured with `eval/`'s harness: 30 labelled queries (`eval/queries.yaml`,
 across seven categories) run against the committed fixture vault
 (`tests/fixtures/vault/`), scored with `recall_at_k`/`mrr` over each
-mode's top 5 results. Reproduce it with `uv run vacancy-radar _eval`
-(private; the public `eval` command lands at stage 6).
+mode's top 5 results. Reproduce it with `uv run vacancy-radar eval`.
 
 **Overall, by mode:**
 

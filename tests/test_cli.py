@@ -1,10 +1,111 @@
+import json
+import shutil
+import sys
+from datetime import date
+from pathlib import Path
+
 import pytest
 from typer.testing import CliRunner
 
 import vacancy_radar
+from vacancy_radar import frontmatter
 from vacancy_radar.cli import app
+from vacancy_radar.index.build import build_index
+from vacancy_radar.index.store import default_index_path
+from vacancy_radar.models import Company, Document, DocumentKind, Status, Vacancy
+from vacancy_radar.vault.paths import VAULT_MARKER_DIRNAME
+from vacancy_radar.vault.reader import read_vault
 
 runner = CliRunner()
+
+FIXTURE_VAULT = Path(__file__).resolve().parent / "fixtures" / "vault"
+
+_ENV_WIDE = {"COLUMNS": "400", "LINES": "50"}
+"""Widens Rich's rendering width for table-output assertions, so a long
+vacancy id or company name never gets column-wrapped mid-string."""
+
+_FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+if str(_FIXTURES_DIR) not in sys.path:
+    sys.path.insert(0, str(_FIXTURES_DIR))
+
+from generate import generate_vault, write_broken_fixtures  # noqa: E402
+
+SEED = 20260101
+
+
+def _broken_vault(tmp_path_factory: pytest.TempPathFactory, name: str) -> Path:
+    vault = tmp_path_factory.mktemp(name)
+    generate_vault(vault, seed=SEED)
+    write_broken_fixtures(vault)
+    return vault
+
+
+# --- Ad hoc single-vacancy vault helpers, for staleness/ambiguity fixtures -
+
+
+def _init_vault(vault: Path) -> None:
+    (vault / VAULT_MARKER_DIRNAME).mkdir(parents=True, exist_ok=True)
+
+
+def _write_company(vault: Path, slug: str, name: str) -> None:
+    company_dir = vault / slug
+    company_dir.mkdir(parents=True, exist_ok=True)
+    company = Company(slug=slug, name=name, domains=[f"{slug}.example"])
+    metadata = company.model_dump(mode="json", exclude_none=True)
+    (company_dir / "_company.md").write_text(
+        frontmatter.serialize(metadata, ""), encoding="utf-8"
+    )
+
+
+def _write_vacancy(vault: Path, slug: str, dirname: str, vacancy: Vacancy) -> Path:
+    vacancy_dir = vault / slug / dirname
+    vacancy_dir.mkdir(parents=True, exist_ok=True)
+    metadata = vacancy.model_dump(
+        mode="json", exclude={"role_is_placeholder"}, exclude_none=True
+    )
+    (vacancy_dir / "vacancy.md").write_text(
+        frontmatter.serialize(metadata, f"# {vacancy.role}\n"), encoding="utf-8"
+    )
+    return vacancy_dir
+
+
+def _write_document(vacancy_dir: Path, document: Document, body: str = "body") -> None:
+    docs_dir = vacancy_dir / "documents"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    metadata = document.model_dump(mode="json", exclude_none=True)
+    (docs_dir / f"{document.id}.md").write_text(
+        frontmatter.serialize(metadata, body), encoding="utf-8"
+    )
+
+
+def _simple_vacancy(
+    vacancy_id: str, slug: str = "tiny-corp", **overrides: object
+) -> Vacancy:
+    fields: dict[str, object] = {
+        "id": vacancy_id,
+        "company": "Tiny Corp",
+        "company_slug": slug,
+        "role": "Engineer",
+        "source_url": f"https://jobs.{slug}.example/{vacancy_id}",
+        "status": Status.FOUND,
+        "found_date": date(2026, 1, 1),
+    }
+    fields.update(overrides)
+    return Vacancy(**fields)  # type: ignore[arg-type]
+
+
+@pytest.fixture(scope="module")
+def built_fixture_vault(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A copy of the committed fixture vault with a fresh index built
+    over it - built once and reused read-only by this module's search/
+    doctor tests. Building is the slow, embedding-marked part."""
+    vault = tmp_path_factory.mktemp("cli-built-fixture-vault")
+    shutil.copytree(FIXTURE_VAULT, vault, dirs_exist_ok=True)
+    build_index(read_vault(vault), default_index_path(vault))
+    return vault
+
+
+# --- version / help / unknown command (pre-existing) ------------------------
 
 
 def test_version_flag_exits_zero_and_prints_version() -> None:
@@ -27,16 +128,322 @@ def test_unknown_command_exits_non_zero() -> None:
     assert result.exit_code != 0
 
 
-def test_eval_command_is_absent_from_help_output() -> None:
+# --- Section 9: list command -------------------------------------------
+
+
+def test_list_command_with_no_options_prints_a_row_per_vacancy() -> None:
+    snapshot = read_vault(FIXTURE_VAULT)
+
+    result = runner.invoke(
+        app,
+        ["list", "--limit", str(len(snapshot.vacancies))],
+        env={**_ENV_WIDE, "VAULT_PATH": str(FIXTURE_VAULT)},
+    )
+
+    assert result.exit_code == 0
+    for vacancy_id in snapshot.vacancies:
+        assert vacancy_id in result.output
+
+
+def test_list_command_status_option_restricts_output() -> None:
+    snapshot = read_vault(FIXTURE_VAULT)
+    target_status = next(iter(snapshot.vacancies.values())).status
+    expected_ids = {
+        v.id for v in snapshot.vacancies.values() if v.status == target_status
+    }
+    other_ids = {v.id for v in snapshot.vacancies.values() if v.status != target_status}
+
+    result = runner.invoke(
+        app,
+        ["list", "--status", target_status.value, "--limit", "1000"],
+        env={**_ENV_WIDE, "VAULT_PATH": str(FIXTURE_VAULT)},
+    )
+
+    assert result.exit_code == 0
+    for vacancy_id in expected_ids:
+        assert vacancy_id in result.output
+    for vacancy_id in other_ids:
+        assert vacancy_id not in result.output
+
+
+def test_list_command_json_emits_valid_json_array_with_no_rich_formatting() -> None:
+    result = runner.invoke(
+        app,
+        ["list", "--json", "--limit", "1000"],
+        env={"VAULT_PATH": str(FIXTURE_VAULT)},
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert isinstance(payload, list)
+    assert payload
+    assert "\x1b[" not in result.output
+
+
+def test_list_command_with_no_vault_configured_names_vault_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VAULT_PATH", raising=False)
+
+    result = runner.invoke(app, ["list"])
+
+    assert result.exit_code != 0
+    assert "VAULT_PATH" in result.output
+
+
+# --- Section 10: show command -------------------------------------------
+
+
+def test_show_command_on_vacancy_id_renders_vacancy_detail() -> None:
+    snapshot = read_vault(FIXTURE_VAULT)
+    vacancy_id = next(iter(snapshot.vacancies))
+
+    result = runner.invoke(
+        app, ["show", vacancy_id], env={**_ENV_WIDE, "VAULT_PATH": str(FIXTURE_VAULT)}
+    )
+
+    assert result.exit_code == 0
+    assert snapshot.vacancies[vacancy_id].role in result.output
+
+
+def test_show_command_on_company_name_renders_company_dossier() -> None:
+    snapshot = read_vault(FIXTURE_VAULT)
+    company = next(iter(snapshot.companies.values()))
+
+    result = runner.invoke(
+        app, ["show", company.slug], env={**_ENV_WIDE, "VAULT_PATH": str(FIXTURE_VAULT)}
+    )
+
+    assert result.exit_code == 0
+    assert company.name in result.output
+
+
+def test_show_command_on_ambiguous_query_exits_non_zero_and_lists_candidates(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "widget-us", "Widget Inc")
+    _write_company(vault, "widget-eu", "Widget Inc")
+
+    result = runner.invoke(app, ["show", "widget inc"], env={"VAULT_PATH": str(vault)})
+
+    assert result.exit_code != 0
+    assert "widget-us" in result.output
+    assert "widget-eu" in result.output
+
+
+def test_show_command_json_on_vacancy_and_company_are_tagged() -> None:
+    snapshot = read_vault(FIXTURE_VAULT)
+    vacancy_id = next(iter(snapshot.vacancies))
+    company_slug = next(iter(snapshot.companies))
+
+    vacancy_result = runner.invoke(
+        app, ["show", vacancy_id, "--json"], env={"VAULT_PATH": str(FIXTURE_VAULT)}
+    )
+    company_result = runner.invoke(
+        app, ["show", company_slug, "--json"], env={"VAULT_PATH": str(FIXTURE_VAULT)}
+    )
+
+    assert json.loads(vacancy_result.output)["kind"] == "vacancy"
+    assert json.loads(company_result.output)["kind"] == "company"
+
+
+def test_show_command_on_nonexistent_query_exits_non_zero_with_message() -> None:
+    result = runner.invoke(
+        app,
+        ["show", "zzz-totally-nonexistent-zzz"],
+        env={"VAULT_PATH": str(FIXTURE_VAULT)},
+    )
+
+    assert result.exit_code != 0
+    assert result.output.strip()
+
+
+# --- Section 11: search command (embedding-marked: needs a built index) ----
+
+
+@pytest.mark.embedding
+def test_search_command_prints_hits(built_fixture_vault: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["search", "Engineer", "--mode", "keyword", "--limit", "5"],
+        env={**_ENV_WIDE, "VAULT_PATH": str(built_fixture_vault)},
+    )
+
+    assert result.exit_code == 0
+
+
+@pytest.mark.embedding
+def test_search_command_company_option_is_forwarded(built_fixture_vault: Path) -> None:
+    snapshot = read_vault(built_fixture_vault)
+    slug = next(iter(snapshot.companies))
+
+    result = runner.invoke(
+        app,
+        [
+            "search",
+            "Engineer",
+            "--mode",
+            "keyword",
+            "--company",
+            slug,
+            "--limit",
+            "50",
+            "--json",
+        ],
+        env={"VAULT_PATH": str(built_fixture_vault)},
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert all(hit["company_slug"] == slug for hit in payload["hits"])
+
+
+@pytest.mark.embedding
+def test_search_command_scores_prints_ranks_and_fused_score(
+    built_fixture_vault: Path,
+) -> None:
+    result = runner.invoke(
+        app,
+        ["search", "Engineer", "--mode", "hybrid", "--scores", "--limit", "5"],
+        env={**_ENV_WIDE, "VAULT_PATH": str(built_fixture_vault)},
+    )
+
+    assert result.exit_code == 0
+    assert "keyword_rank" in result.output
+    assert "semantic_rank" in result.output
+
+
+@pytest.mark.embedding
+def test_search_command_json_emits_valid_json_with_no_rich_formatting(
+    built_fixture_vault: Path,
+) -> None:
+    result = runner.invoke(
+        app,
+        ["search", "Engineer", "--mode", "keyword", "--json"],
+        env={"VAULT_PATH": str(built_fixture_vault)},
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert "hits" in payload
+    assert "\x1b[" not in result.output
+
+
+# --- Section 12: doctor command ------------------------------------------
+
+
+@pytest.mark.embedding
+def test_doctor_command_on_healthy_vault_with_fresh_index_exits_zero(
+    built_fixture_vault: Path,
+) -> None:
+    result = runner.invoke(
+        app, ["doctor"], env={"VAULT_PATH": str(built_fixture_vault)}
+    )
+
+    assert result.exit_code == 0
+
+
+def test_doctor_command_on_broken_vault_exits_non_zero_and_lists_warnings(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    vault = _broken_vault(tmp_path_factory, "doctor-broken")
+
+    result = runner.invoke(app, ["doctor"], env={**_ENV_WIDE, "VAULT_PATH": str(vault)})
+
+    assert result.exit_code != 0
+    for marker in (
+        "broken-yaml-vacancy",
+        "unreadable-vacancy",
+        "duplicate-vacancy-id",
+        "orphan-vacancy",
+    ):
+        assert marker in result.output
+
+    # Restore permissions so pytest's tmp_path cleanup can remove it.
+    unreadable_path = (
+        vault / "unreadable-vault-corp" / "unreadable-vacancy" / "vacancy.md"
+    )
+    unreadable_path.chmod(0o644)
+
+
+@pytest.mark.embedding
+def test_doctor_command_reports_stale_index_without_failing_alone(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "tiny-corp", "Tiny Corp")
+    vacancy_dir = _write_vacancy(vault, "tiny-corp", "v1", _simple_vacancy("v1"))
+    _write_document(
+        vacancy_dir,
+        Document(
+            id="v1-doc1",
+            vacancy_id="v1",
+            kind=DocumentKind.NOTE,
+            title="Note",
+            date=date(2026, 1, 2),
+        ),
+    )
+    build_index(read_vault(vault), default_index_path(vault))
+    _write_document(
+        vacancy_dir,
+        Document(
+            id="v1-doc2",
+            vacancy_id="v1",
+            kind=DocumentKind.NOTE,
+            title="New note",
+            date=date(2026, 1, 9),
+        ),
+    )
+
+    result = runner.invoke(app, ["doctor"], env={"VAULT_PATH": str(vault)})
+
+    assert result.exit_code == 0
+    assert "build_index" in result.output
+
+
+def test_doctor_command_with_no_vault_configured_names_vault_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VAULT_PATH", raising=False)
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert result.exit_code != 0
+    assert "VAULT_PATH" in result.output
+
+
+def test_doctor_command_json_emits_valid_json() -> None:
+    result = runner.invoke(
+        app, ["doctor", "--json"], env={"VAULT_PATH": str(FIXTURE_VAULT)}
+    )
+
+    payload = json.loads(result.output)
+    assert "vault_path" in payload
+
+
+# --- Section 13: public eval command, replacing _eval ------------------
+
+
+def test_eval_command_is_listed_in_help_output_and_underscore_eval_is_not() -> None:
     result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == 0
+    assert "eval" in result.output
     assert "_eval" not in result.output
+
+
+def test_underscore_eval_is_now_an_unknown_command() -> None:
+    result = runner.invoke(app, ["_eval"])
+
+    assert result.exit_code != 0
 
 
 @pytest.mark.embedding
 def test_eval_command_runs_the_full_sweep_and_prints_a_markdown_report() -> None:
-    result = runner.invoke(app, ["_eval"])
+    result = runner.invoke(app, ["eval"])
 
     assert result.exit_code == 0
     assert "| mode | vector_weight | fusion | category | recall@5 | MRR | n |" in (
