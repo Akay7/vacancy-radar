@@ -593,14 +593,33 @@ def status_set_command(  # noqa: PLR0913 - each option mirrors set_status's own 
 # --- add ---------------------------------------------------------------
 
 
+_NOT_UTF8_HINT = (
+    "add only accepts text content. To attach a binary file such as a "
+    "PDF, copy it directly into the vacancy's documents/ directory and "
+    "run 'vacancy-radar reindex --extract-sidecars' (PDFs only)."
+)
+
+
 def _read_document_content(*, file: Path | None, stdin: bool) -> str:
     if file is not None and stdin:
         error_console.print("Error: pass either --file or --stdin, not both")
         raise typer.Exit(code=1)
     if file is not None:
-        return file.read_text(encoding="utf-8")
+        try:
+            return file.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            error_console.print(
+                f"Error: {file} is not valid UTF-8 text - {_NOT_UTF8_HINT}"
+            )
+            raise typer.Exit(code=1) from None
     if stdin:
-        return sys.stdin.read()
+        try:
+            return sys.stdin.read()
+        except UnicodeDecodeError:
+            error_console.print(
+                f"Error: standard input is not valid UTF-8 text - {_NOT_UTF8_HINT}"
+            )
+            raise typer.Exit(code=1) from None
     error_console.print("Error: pass either --file or --stdin")
     raise typer.Exit(code=1)
 
@@ -699,13 +718,18 @@ def new_command(  # noqa: PLR0913 - each option mirrors create_vacancy's own sig
         str, typer.Option("--company", help="The company's display name.")
     ],
     role: Annotated[str, typer.Option("--role", help="The role title.")],
-    url: Annotated[str, typer.Option("--url", help="The posting's source URL.")],
     found_date: Annotated[
         str, typer.Option("--found-date", help="ISO date the vacancy was found.")
     ],
     status: Annotated[
         str, typer.Option("--status", help="Initial status; defaults to 'found'.")
     ] = Status.FOUND.value,
+    url: Annotated[
+        str | None,
+        typer.Option(
+            "--url", help="The posting's source URL. Omit when the source has none."
+        ),
+    ] = None,
     applied_date: Annotated[
         str | None,
         typer.Option("--applied-date", help="Required when --status is not 'found'."),
@@ -720,7 +744,12 @@ def new_command(  # noqa: PLR0913 - each option mirrors create_vacancy's own sig
 
     try:
         path = core.create_vacancy(
-            company, role, url, found_date_value, status, applied_date_value
+            company,
+            role,
+            found_date_value,
+            status,
+            source_url=url,
+            applied_date=applied_date_value,
         )
     except _CORE_ERRORS as exc:
         _fail(exc)
@@ -743,13 +772,20 @@ def reindex_command(
     force: Annotated[
         bool, typer.Option("--force", help="Re-embed every row, not only changed ones.")
     ] = False,
+    extract_sidecars: Annotated[
+        bool,
+        typer.Option(
+            "--extract-sidecars",
+            help="Extract text sidecars for eligible PDFs under documents/.",
+        ),
+    ] = False,
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit JSON instead of plain output.")
     ] = False,
 ) -> None:
     """Rebuild the index from the vault's current state."""
     try:
-        report = core.reindex(force=force)
+        report = core.reindex(force=force, extract_sidecars=extract_sidecars)
     except _CORE_ERRORS as exc:
         _fail(exc)
 
@@ -760,3 +796,5 @@ def reindex_command(
             f"added={report.added} changed={report.changed} deleted={report.deleted} "
             f"unchanged={report.unchanged} skipped={report.skipped}"
         )
+        for warning in report.warnings:
+            console.print(f"[yellow]warning:[/yellow] {warning.message}")

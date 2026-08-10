@@ -448,7 +448,7 @@ class VacancyDetail(BaseModel):
     company_slug: str
     role: str
     status: Status
-    source_url: str
+    source_url: str | None = None
     found_date: date
     applied_date: date | None = None
     stage_note: str | None = None
@@ -805,16 +805,30 @@ def _derive_document_filename(
 # --- Writing: reindex() ------------------------------------------------
 
 
-def reindex(*, force: bool = False, vault: Path | None = None) -> IndexReport:
+def reindex(
+    *, force: bool = False, extract_sidecars: bool = False, vault: Path | None = None
+) -> IndexReport:
     """Wrap stage 3's incremental `build_index` over a fresh
     `VaultSnapshot` (design.md decision 4). Every write function below
     calls this with `force=False` as its last step, before returning -
     the same call `vacancy-radar reindex` makes directly. Cheap when
     little changed: `build_index` diffs by content hash and re-embeds
-    only what's new or changed."""
+    only what's new or changed.
+
+    `extract_sidecars` defaults to `False` and is forwarded to
+    `build_index` unchanged - PDF sidecar extraction stays opt-in, per
+    stage 3's design.md ("a build must not silently create sidecar
+    files on every run"), reachable now via `vacancy-radar reindex
+    --extract-sidecars` (see the sidecar-extraction-cli change's
+    design.md decision 1)."""
     vault_root = resolve_vault_path(vault)
     index_path = default_index_path(vault_root)
-    return build_index(read_vault(vault_root), index_path, force=force)
+    return build_index(
+        read_vault(vault_root),
+        index_path,
+        force=force,
+        extract_sidecars=extract_sidecars,
+    )
 
 
 # --- Writing: add_document() ------------------------------------------
@@ -1119,9 +1133,9 @@ def _existing_ids_for_collision_check(
 def create_vacancy(  # noqa: PLR0913, PLR0917 - the deliverable's public signature; each is meaningful
     company: str,
     role: str,
-    source_url: str,
     found_date: date,
     status: Status | str,
+    source_url: str | None = None,
     applied_date: date | None = None,
     stage_note: str | None = None,
     salary_note: str | None = None,
@@ -1137,11 +1151,16 @@ def create_vacancy(  # noqa: PLR0913, PLR0917 - the deliverable's public signatu
     leaves an existing company's `_company.md` untouched (design.md
     decision 8). Never overwrites anything - `new_vacancy_id`'s
     suffixing means a second call with the same inputs mints a distinct
-    id, not a collision. `stage_note`/`salary_note`/`recruiter`/`tags`
-    are optional and forwarded to `Vacancy` unchanged (`tags` defaults
-    to an empty list, matching `Vacancy`'s own default, when omitted) -
-    see the llm-import change's design.md decision 5. Refreshes the
-    index before returning."""
+    id, not a collision. `source_url`/`stage_note`/`salary_note`/
+    `recruiter`/`tags` are optional and forwarded to `Vacancy` unchanged
+    (`tags` defaults to an empty list, matching `Vacancy`'s own default,
+    when omitted) - see the llm-import change's design.md decision 5
+    and the optional-vacancy-url change's design.md decision 1 (the
+    signature reorder that moved `source_url` here, since `found_date`/
+    `status` after it must stay required). Refreshes the index before
+    returning. Callers SHOULD use keyword arguments - positional calls
+    written against the pre-reorder argument order will silently
+    misassign values rather than raise a clean error."""
     vault_root = resolve_vault_path(vault)
     snapshot = read_vault(vault_root)
 
@@ -1200,7 +1219,7 @@ def create_vacancy(  # noqa: PLR0913, PLR0917 - the deliverable's public signatu
 
 
 def find_existing(
-    company: str, source_url: str, vault: Path | None = None
+    company: str, source_url: str | None = None, vault: Path | None = None
 ) -> list[VacancySummary]:
     """Best-effort pre-check for `create_vacancy` callers: every vacancy
     matching `company` (via `resolve`'s own, non-raising company-tier
@@ -1212,7 +1231,15 @@ def find_existing(
     that vacancy's own company. One `read_vault` call, reusing
     `resolve`'s and `list_vacancies`'s own private helpers rather than
     calling either public function (which would each re-read the
-    vault) - see design.md decision 2."""
+    vault) - see design.md decision 2.
+
+    `source_url` is optional - a caller may have none to check against
+    (e.g. a recruiter sent only a PDF, no posting link). The source_url
+    tier only ever contributes a match when `source_url` is not `None`
+    and equals a vacancy's own non-`None` `source_url` exactly - two
+    vacancies that both lack a `source_url` are never matched to each
+    other on that basis (optional-vacancy-url change's design.md
+    decision 2)."""
     snapshot = read_vault(resolve_vault_path(vault))
 
     matched_ids: dict[str, None] = {}
@@ -1223,8 +1250,9 @@ def find_existing(
             if vacancy.company_slug == resolution.company_slug:
                 matched_ids[vacancy.id] = None
 
-    for vacancy in snapshot.vacancies.values():
-        if vacancy.source_url == source_url:
-            matched_ids[vacancy.id] = None
+    if source_url is not None:
+        for vacancy in snapshot.vacancies.values():
+            if vacancy.source_url == source_url:
+                matched_ids[vacancy.id] = None
 
     return [_vacancy_summary(vacancy_id, snapshot) for vacancy_id in matched_ids]

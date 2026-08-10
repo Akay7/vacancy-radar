@@ -29,6 +29,7 @@ if str(_FIXTURES_DIR) not in sys.path:
     sys.path.insert(0, str(_FIXTURES_DIR))
 
 from generate import generate_vault, write_broken_fixtures  # noqa: E402
+from pdfs import write_encrypted_pdf, write_malformed_pdf, write_valid_pdf  # noqa: E402
 
 SEED = 20260101
 
@@ -663,6 +664,91 @@ def test_add_command_stdin_creates_a_document_with_piped_content(
     assert body == "Email body from stdin."
 
 
+def test_add_command_file_non_utf8_exits_cleanly_not_with_traceback(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+    pdf = tmp_path / "posting.pdf"
+    write_valid_pdf(pdf)
+
+    result = runner.invoke(
+        app,
+        [
+            "add",
+            "v1",
+            "--kind",
+            "posting",
+            "--title",
+            "Posting",
+            "--date",
+            "2026-01-05",
+            "--file",
+            str(pdf),
+        ],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "posting.pdf" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_add_command_file_non_utf8_error_names_the_pdf_workaround(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+    pdf = tmp_path / "posting.pdf"
+    write_valid_pdf(pdf)
+
+    result = runner.invoke(
+        app,
+        [
+            "add",
+            "v1",
+            "--kind",
+            "posting",
+            "--title",
+            "Posting",
+            "--date",
+            "2026-01-05",
+            "--file",
+            str(pdf),
+        ],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert "documents/" in result.output
+    assert "reindex --extract-sidecars" in result.output
+
+
+def test_add_command_stdin_non_utf8_exits_cleanly_not_with_traceback(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        [
+            "add",
+            "v1",
+            "--kind",
+            "email",
+            "--title",
+            "Recruiter Email",
+            "--date",
+            "2026-01-05",
+            "--stdin",
+        ],
+        input=b"\xff\xfe not valid utf-8 at all",
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code != 0
+    assert "not valid" in result.output.lower() or "utf-8" in result.output.lower()
+    assert "Traceback" not in result.output
+
+
 def test_add_command_external_id_dedupe_reports_existing_and_creates_no_file(
     tmp_path: Path,
 ) -> None:
@@ -855,6 +941,68 @@ def test_new_command_creates_vacancy_and_is_listed_afterward(tmp_path: Path) -> 
     assert any(row["company"] == "Acme Corp" for row in rows)
 
 
+def test_new_command_without_url_creates_vacancy_with_no_source_url(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    result = runner.invoke(
+        app,
+        [
+            "new",
+            "--company",
+            "Acme Corp",
+            "--role",
+            "Engineer",
+            "--found-date",
+            "2026-01-01",
+            "--json",
+        ],
+        env={"VAULT_PATH": str(vault)},
+    )
+    assert result.exit_code == 0
+    vacancy_id = json.loads(result.output)["id"]
+
+    detail = runner.invoke(
+        app, ["show", vacancy_id, "--json"], env={"VAULT_PATH": str(vault)}
+    )
+    assert detail.exit_code == 0
+    payload = json.loads(detail.output)
+    assert payload["source_url"] is None
+
+
+def test_new_command_with_url_still_works(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    result = runner.invoke(
+        app,
+        [
+            "new",
+            "--company",
+            "Acme Corp",
+            "--role",
+            "Engineer",
+            "--url",
+            "https://jobs.acme.example/1",
+            "--found-date",
+            "2026-01-01",
+            "--json",
+        ],
+        env={"VAULT_PATH": str(vault)},
+    )
+    assert result.exit_code == 0
+    vacancy_id = json.loads(result.output)["id"]
+
+    detail = runner.invoke(
+        app, ["show", vacancy_id, "--json"], env={"VAULT_PATH": str(vault)}
+    )
+    assert detail.exit_code == 0
+    payload = json.loads(detail.output)
+    assert payload["source_url"] == "https://jobs.acme.example/1"
+
+
 def test_new_command_non_found_status_without_applied_date_exits_nonzero(
     tmp_path: Path,
 ) -> None:
@@ -974,6 +1122,106 @@ def test_reindex_command_json_matches_index_report_fields(tmp_path: Path) -> Non
         "elapsed",
         "warnings",
     }
+
+
+def test_reindex_extract_sidecars_flag_creates_sidecar(tmp_path: Path) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    write_valid_pdf(docs_dir / "posting.pdf")
+
+    result = runner.invoke(
+        app, ["reindex", "--extract-sidecars"], env={"VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code == 0
+    assert (docs_dir / "posting.pdf.md").is_file()
+
+
+def test_reindex_without_flag_creates_no_sidecar(tmp_path: Path) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    write_valid_pdf(docs_dir / "posting.pdf")
+
+    result = runner.invoke(app, ["reindex"], env={"VAULT_PATH": str(vault)})
+
+    assert result.exit_code == 0
+    assert not (docs_dir / "posting.pdf.md").exists()
+
+
+def test_reindex_plain_text_output_includes_extraction_warning(tmp_path: Path) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    write_malformed_pdf(docs_dir / "broken.pdf")
+
+    result = runner.invoke(
+        app, ["reindex", "--extract-sidecars"], env={"VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code == 0
+    assert "broken.pdf" in result.output
+
+
+def test_reindex_plain_text_output_includes_encrypted_pdf_warning(
+    tmp_path: Path,
+) -> None:
+    # Scope note (tasks.md 2.4): a true `vanished_source` warning needs a
+    # snapshot that's gone stale between read_vault and build_index - not
+    # reachable through this CLI's black-box invocation, since
+    # core.reindex always reads fresh immediately before building.
+    # encrypted_pdf is a second, distinct warning kind extraction
+    # actually produces, still proving the plain-text branch prints
+    # whatever IndexReport.warnings carries rather than special-casing
+    # one warning kind.
+    vault = _minimal_vault(tmp_path / "vault")
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    write_encrypted_pdf(docs_dir / "locked.pdf")
+
+    result = runner.invoke(
+        app, ["reindex", "--extract-sidecars"], env={"VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code == 0
+    assert "locked.pdf" in result.output
+
+
+def test_reindex_json_warnings_field_populated_on_extraction_failure(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    write_malformed_pdf(docs_dir / "broken.pdf")
+
+    result = runner.invoke(
+        app,
+        ["reindex", "--extract-sidecars", "--json"],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert set(payload) == {
+        "added",
+        "changed",
+        "deleted",
+        "unchanged",
+        "skipped",
+        "elapsed",
+        "warnings",
+    }
+    assert payload["warnings"]
+    # Each warning serializes as its str(VaultWarning) repr, not a
+    # structured {kind, message, paths} object - dataclasses.asdict
+    # doesn't know how to recurse into a pydantic BaseModel nested in a
+    # dataclass field, so json.dumps's `default=` fallback stringifies
+    # it whole. Pre-existing behavior, unchanged by this change (which
+    # only touches the plain-text branch) - asserting the real shape
+    # here rather than the structured one originally assumed.
+    assert any("broken.pdf" in w for w in payload["warnings"])
 
 
 # --- Section 14: cross-cutting write-command tests --------------------------

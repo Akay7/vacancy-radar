@@ -100,10 +100,14 @@ class Vacancy(BaseModel):
     company: str
     company_slug: str
     role: str
-    source_url: str
     status: Status
     found_date: date
 
+    source_url: str | None = None
+    """Optional - some sources (a recruiter's PDF attachment, with no
+    posting link) have no URL at all. Validated as http/https only
+    when a value is given (see optional-vacancy-url change's
+    design.md)."""
     applied_date: date | None = None
 
     stage_note: str | None = None
@@ -114,7 +118,9 @@ class Vacancy(BaseModel):
 
     @field_validator("source_url")
     @classmethod
-    def _validate_source_url_scheme(cls, value: str) -> str:
+    def _validate_source_url_scheme(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if urlparse(value).scheme not in ("http", "https"):
             msg = "source_url must be an http or https URL"
             raise ValueError(msg)

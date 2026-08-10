@@ -1,3 +1,4 @@
+import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -21,6 +22,12 @@ from vacancy_radar.vault.paths import VAULT_MARKER_DIRNAME
 from vacancy_radar.vault.reader import VaultSnapshot, read_vault
 
 FIXTURE_VAULT = Path(__file__).resolve().parent / "fixtures" / "vault"
+
+_FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+if str(_FIXTURES_DIR) not in sys.path:
+    sys.path.insert(0, str(_FIXTURES_DIR))
+
+from pdfs import write_malformed_pdf, write_valid_pdf  # noqa: E402
 
 # --- Ad hoc vault-building helpers (1.3) -----------------------------------
 #
@@ -902,6 +909,59 @@ def test_reindex_picks_up_a_vault_change_made_outside_core(tmp_path: Path) -> No
     assert report.added == 1
 
 
+@pytest.mark.embedding
+def test_reindex_extract_sidecars_true_creates_sidecar_for_eligible_pdf(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    pdf_path = docs_dir / "posting.pdf"
+    write_valid_pdf(pdf_path)
+
+    core.reindex(extract_sidecars=True, vault=vault)
+
+    sidecar = docs_dir / "posting.pdf.md"
+    assert sidecar.is_file()
+
+
+@pytest.mark.embedding
+def test_reindex_default_extract_sidecars_false_creates_no_sidecar(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    pdf_path = docs_dir / "posting.pdf"
+    write_valid_pdf(pdf_path)
+
+    core.reindex(vault=vault)
+
+    sidecar = docs_dir / "posting.pdf.md"
+    assert not sidecar.exists()
+
+
+@pytest.mark.embedding
+def test_reindex_extract_sidecars_true_malformed_pdf_returns_warning_not_crash(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    docs_dir = vault / "tiny-corp" / "v1" / "documents"
+    pdf_path = docs_dir / "broken.pdf"
+    write_malformed_pdf(pdf_path)
+
+    report = core.reindex(extract_sidecars=True, vault=vault)
+
+    # extract_to_sidecar still writes a sidecar on a failed-but-handled
+    # extraction (empty body) - the warning, not a missing sidecar, is
+    # what signals the failure.
+    sidecar = docs_dir / "broken.pdf.md"
+    assert sidecar.is_file()
+    _, body = frontmatter.parse(
+        sidecar.read_text(encoding="utf-8"), filename=str(sidecar)
+    )
+    assert body.strip() == ""
+    assert any("broken.pdf" in w.message for w in report.warnings)
+
+
 # --- Section 4 (stage 7 write half): add_document() -------------------------
 
 
@@ -1303,9 +1363,9 @@ def test_create_vacancy_new_company_creates_directory_and_company_md(
     path = core.create_vacancy(
         "Acme Corp",
         "Engineer",
-        "https://jobs.acme.example/1",
         date(2026, 1, 1),
         Status.FOUND,
+        source_url="https://jobs.acme.example/1",
         vault=vault,
     )
 
@@ -1322,9 +1382,9 @@ def test_create_vacancy_existing_company_leaves_company_md_untouched(
     core.create_vacancy(
         "Acme Corp",
         "Engineer",
-        "https://jobs.acme.example/1",
         date(2026, 1, 1),
         Status.FOUND,
+        source_url="https://jobs.acme.example/1",
         vault=vault,
     )
     company_md = vault / "acme-corp" / "_company.md"
@@ -1333,9 +1393,9 @@ def test_create_vacancy_existing_company_leaves_company_md_untouched(
     second_path = core.create_vacancy(
         "Acme Corp",
         "Designer",
-        "https://jobs.acme.example/2",
         date(2026, 1, 2),
         Status.FOUND,
+        source_url="https://jobs.acme.example/2",
         vault=vault,
     )
 
@@ -1353,17 +1413,17 @@ def test_create_vacancy_collision_gets_a_distinct_suffixed_id(tmp_path: Path) ->
     first = core.create_vacancy(
         "Acme Corp",
         UNKNOWN_ROLE,
-        "https://jobs.acme.example/1",
         date(2026, 1, 1),
         Status.FOUND,
+        source_url="https://jobs.acme.example/1",
         vault=vault,
     )
     second = core.create_vacancy(
         "Acme Corp",
         UNKNOWN_ROLE,
-        "https://jobs.acme.example/2",
         date(2026, 1, 1),
         Status.FOUND,
+        source_url="https://jobs.acme.example/2",
         vault=vault,
     )
 
@@ -1386,9 +1446,9 @@ def test_create_vacancy_found_status_with_no_applied_date_succeeds(
     path = core.create_vacancy(
         "Acme Corp",
         "Engineer",
-        "https://jobs.acme.example/1",
         date(2026, 1, 1),
         Status.FOUND,
+        source_url="https://jobs.acme.example/1",
         vault=vault,
     )
 
@@ -1405,9 +1465,9 @@ def test_create_vacancy_non_found_status_without_applied_date_raises(
         core.create_vacancy(
             "Acme Corp",
             "Engineer",
-            "https://jobs.acme.example/1",
             date(2026, 1, 1),
             Status.APPLIED,
+            source_url="https://jobs.acme.example/1",
             vault=vault,
         )
 
@@ -1425,9 +1485,9 @@ def test_create_vacancy_invalid_status_string_raises_typed_error(
         core.create_vacancy(
             "Acme Corp",
             "Engineer",
-            "https://jobs.acme.example/1",
             date(2026, 1, 1),
             "not-a-real-status",
+            source_url="https://jobs.acme.example/1",
             vault=vault,
         )
 
@@ -1444,9 +1504,9 @@ def test_create_vacancy_is_listed_and_searchable_immediately(tmp_path: Path) -> 
     core.create_vacancy(
         "Quokka Systems",
         "Distributed Systems Engineer",
-        "https://jobs.quokka.example/1",
         date(2026, 1, 1),
         Status.FOUND,
+        source_url="https://jobs.quokka.example/1",
         vault=vault,
     )
 
@@ -1469,9 +1529,9 @@ def test_create_vacancy_stores_optional_fields(tmp_path: Path) -> None:
     path = core.create_vacancy(
         "Acme Corp",
         "Engineer",
-        "https://jobs.acme.example/1",
         date(2026, 1, 1),
         Status.APPLIED,
+        source_url="https://jobs.acme.example/1",
         applied_date=date(2026, 1, 2),
         stage_note="Recruiter called, phone screen next week.",
         salary_note="120-140k, quoted verbally",
@@ -1495,9 +1555,9 @@ def test_create_vacancy_tags_defaults_to_empty_list(tmp_path: Path) -> None:
     path = core.create_vacancy(
         "Acme Corp",
         "Engineer",
-        "https://jobs.acme.example/1",
         date(2026, 1, 1),
         Status.FOUND,
+        source_url="https://jobs.acme.example/1",
         vault=vault,
     )
 
@@ -1513,9 +1573,9 @@ def test_create_vacancy_optional_str_fields_default_absent(tmp_path: Path) -> No
     path = core.create_vacancy(
         "Acme Corp",
         "Engineer",
-        "https://jobs.acme.example/1",
         date(2026, 1, 1),
         Status.FOUND,
+        source_url="https://jobs.acme.example/1",
         vault=vault,
     )
 
@@ -1524,6 +1584,60 @@ def test_create_vacancy_optional_str_fields_default_absent(tmp_path: Path) -> No
     assert "stage_note" not in metadata
     assert "salary_note" not in metadata
     assert "recruiter" not in metadata
+
+
+# --- Section 8d (optional-vacancy-url): create_vacancy without source_url --
+
+
+def test_create_vacancy_without_source_url_creates_vacancy_with_none(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    path = core.create_vacancy(
+        "Acme Corp", "Engineer", date(2026, 1, 1), Status.FOUND, vault=vault
+    )
+
+    snapshot = read_vault(vault)
+    vacancy_id = path.parent.name
+    assert snapshot.vacancies[vacancy_id].source_url is None
+
+
+def test_create_vacancy_with_source_url_still_stores_it(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    path = core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        date(2026, 1, 1),
+        Status.FOUND,
+        source_url="https://jobs.acme.example/1",
+        vault=vault,
+    )
+
+    snapshot = read_vault(vault)
+    vacancy_id = path.parent.name
+    assert snapshot.vacancies[vacancy_id].source_url == "https://jobs.acme.example/1"
+
+
+def test_create_vacancy_invalid_source_url_scheme_still_raises(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    with pytest.raises(core.InvalidVacancyDataError):
+        core.create_vacancy(
+            "Acme Corp",
+            "Engineer",
+            date(2026, 1, 1),
+            Status.FOUND,
+            source_url="ftp://jobs.acme.example/1",
+            vault=vault,
+        )
+
+    snapshot = read_vault(vault)
+    assert snapshot.vacancies_for("acme-corp") == []
 
 
 # --- Section 8c (stage 9): find_existing() ----------------------------------
@@ -1535,17 +1649,17 @@ def test_find_existing_matches_existing_company(tmp_path: Path) -> None:
     core.create_vacancy(
         "Acme Corp",
         "Engineer",
-        "https://jobs.acme.example/1",
         date(2026, 1, 1),
         Status.FOUND,
+        source_url="https://jobs.acme.example/1",
         vault=vault,
     )
     core.create_vacancy(
         "Acme Corp",
         "Designer",
-        "https://jobs.acme.example/2",
         date(2026, 1, 2),
         Status.FOUND,
+        source_url="https://jobs.acme.example/2",
         vault=vault,
     )
 
@@ -1562,9 +1676,9 @@ def test_find_existing_empty_for_unknown_company_and_url(tmp_path: Path) -> None
     core.create_vacancy(
         "Acme Corp",
         "Engineer",
-        "https://jobs.acme.example/1",
         date(2026, 1, 1),
         Status.FOUND,
+        source_url="https://jobs.acme.example/1",
         vault=vault,
     )
 
@@ -1616,9 +1730,9 @@ def test_find_existing_matches_by_source_url_across_company_spellings(
     core.create_vacancy(
         "Acme Corp",
         "Engineer",
-        "https://jobs.acme.example/1",
         date(2026, 1, 1),
         Status.FOUND,
+        source_url="https://jobs.acme.example/1",
         vault=vault,
     )
 
@@ -1637,9 +1751,9 @@ def test_find_existing_does_not_duplicate_a_vacancy_matching_both_tiers(
     core.create_vacancy(
         "Acme Corp",
         "Engineer",
-        "https://jobs.acme.example/1",
         date(2026, 1, 1),
         Status.FOUND,
+        source_url="https://jobs.acme.example/1",
         vault=vault,
     )
 
@@ -1648,6 +1762,74 @@ def test_find_existing_does_not_duplicate_a_vacancy_matching_both_tiers(
     )
 
     assert len(matches) == 1
+
+
+# --- Section 8e (optional-vacancy-url): find_existing without source_url --
+
+
+def test_find_existing_no_source_url_still_matches_by_company(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    core.create_vacancy(
+        "Acme Corp", "Engineer", date(2026, 1, 1), Status.FOUND, vault=vault
+    )
+
+    matches = core.find_existing("Acme Corp", vault=vault)
+
+    assert {m.role for m in matches} == {"Engineer"}
+
+
+def test_find_existing_no_source_url_never_false_matches_across_companies(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    core.create_vacancy(
+        "Acme Corp", "Engineer", date(2026, 1, 1), Status.FOUND, vault=vault
+    )
+    core.create_vacancy(
+        "Beta Inc", "Designer", date(2026, 1, 2), Status.FOUND, vault=vault
+    )
+
+    matches = core.find_existing("Acme Corp", vault=vault)
+
+    assert {m.role for m in matches} == {"Engineer"}
+
+
+def test_find_existing_omitting_source_url_never_matches_via_that_tier(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    core.create_vacancy(
+        "Acme Corp", "Engineer", date(2026, 1, 1), Status.FOUND, vault=vault
+    )
+    core.create_vacancy(
+        "Beta Inc", "Designer", date(2026, 1, 2), Status.FOUND, vault=vault
+    )
+
+    matches = core.find_existing("No Such Company", vault=vault)
+
+    assert matches == []
+
+
+def test_find_existing_with_real_source_url_unchanged(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        date(2026, 1, 1),
+        Status.FOUND,
+        source_url="https://jobs.acme.example/1",
+        vault=vault,
+    )
+
+    matches = core.find_existing(
+        "No Such Company", "https://jobs.acme.example/1", vault=vault
+    )
+
+    assert {m.role for m in matches} == {"Engineer"}
 
 
 # --- Section 14: cross-cutting failure-atomicity tests -----------------
@@ -1717,9 +1899,9 @@ def test_write_sequence_never_removes_a_preexisting_file(tmp_path: Path) -> None
     vacancy_path = core.create_vacancy(
         "Acme Corp",
         "Engineer",
-        "https://jobs.acme.example/1",
         date(2026, 1, 1),
         Status.FOUND,
+        source_url="https://jobs.acme.example/1",
         vault=vault,
     )
     vacancy_id = vacancy_path.parent.name

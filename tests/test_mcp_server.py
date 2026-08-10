@@ -753,14 +753,14 @@ def test_create_vacancy_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
     mock.assert_called_once_with(
         "Acme Corp",
         "Backend Engineer",
-        "https://jobs.acme.example/1",
         date(2026, 8, 10),
         Status.FOUND,
-        None,
-        None,
-        None,
-        None,
-        None,
+        source_url="https://jobs.acme.example/1",
+        applied_date=None,
+        stage_note=None,
+        salary_note=None,
+        recruiter=None,
+        tags=None,
         vault=vault,
     )
     assert (
@@ -809,14 +809,14 @@ def test_create_vacancy_omitting_optional_fields_matches_core_defaults(
     mock.assert_called_once_with(
         "Acme Corp",
         "Backend Engineer",
-        "https://jobs.acme.example/1",
         date(2026, 8, 10),
         Status.FOUND,
-        None,
-        None,
-        None,
-        None,
-        None,
+        source_url="https://jobs.acme.example/1",
+        applied_date=None,
+        stage_note=None,
+        salary_note=None,
+        recruiter=None,
+        tags=None,
         vault=vault,
     )
 
@@ -923,6 +923,30 @@ def test_create_vacancy_applied_date_before_found_date_returns_typed_error(
         run(server.call_tool("create_vacancy", args))
 
     assert not (vault / "acme-corp").exists()
+
+
+def test_create_vacancy_tool_without_source_url_creates_vacancy_with_none(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    server = mcp_server.build_server(vault)
+    args = dict(_CREATE_VACANCY_ARGS)
+    del args["source_url"]
+
+    result = run(server.call_tool("create_vacancy", args))
+
+    vacancy_id = result.structured_content["id"]
+    detail = run(server.call_tool("get_vacancy", {"id_or_query": vacancy_id}))
+    assert detail.structured_content["source_url"] is None
+
+
+def test_create_vacancy_description_states_no_source_url_convention() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    tools = {t.name: t for t in run(server.list_tools())}
+    description = tools["create_vacancy"].description.lower()
+    assert "source_url" in description
+    assert "pdf" in description
 
 
 def test_create_vacancy_description_states_unknown_role_convention() -> None:
@@ -1042,6 +1066,18 @@ def test_find_existing_tool_returns_matches_for_existing_company(
             {"company": "Acme Corp", "source_url": "https://nowhere.example/1"},
         )
     )
+
+    companies = {row["company"] for row in result.structured_content["result"]}
+    assert companies == {"Acme Corp"}
+
+
+def test_find_existing_tool_without_source_url_still_matches_by_company(
+    tmp_path: Path,
+) -> None:
+    vault = _demo_vault(tmp_path / "vault")
+    server = mcp_server.build_server(vault)
+
+    result = run(server.call_tool("find_existing", {"company": "Acme Corp"}))
 
     companies = {row["company"] for row in result.structured_content["result"]}
     assert companies == {"Acme Corp"}

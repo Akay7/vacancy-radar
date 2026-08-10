@@ -74,7 +74,7 @@ def minimal_vacancy_data(**overrides: object) -> dict:
 
 @pytest.mark.parametrize(
     "missing_field",
-    ["id", "company", "company_slug", "role", "source_url", "status", "found_date"],
+    ["id", "company", "company_slug", "role", "status", "found_date"],
 )
 def test_omitting_a_mandatory_field_is_rejected(missing_field: str) -> None:
     data = minimal_vacancy_data()
@@ -90,6 +90,21 @@ def test_omitting_a_mandatory_field_is_rejected(missing_field: str) -> None:
 def test_source_url_must_be_http_or_https() -> None:
     with pytest.raises(ValidationError):
         Vacancy(**minimal_vacancy_data(source_url="ftp://example.com/job"))
+
+
+def test_vacancy_omitting_source_url_parses() -> None:
+    data = minimal_vacancy_data()
+    del data["source_url"]
+
+    vacancy = Vacancy(**data)
+
+    assert vacancy.source_url is None
+
+
+def test_vacancy_with_valid_source_url_still_stored() -> None:
+    vacancy = Vacancy(**minimal_vacancy_data(source_url="https://example.com/jobs/1"))
+
+    assert vacancy.source_url == "https://example.com/jobs/1"
 
 
 def test_minimal_vacancy_with_no_optional_fields_parses() -> None:

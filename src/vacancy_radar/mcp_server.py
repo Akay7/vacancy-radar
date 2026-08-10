@@ -276,14 +276,19 @@ def _register_read_tools(server: MCPServer, vault_path: Path) -> None:
 
     @server.tool(annotations=_READ_ONLY)
     @_delegate
-    async def find_existing(company: str, source_url: str) -> list[core.VacancySummary]:
+    async def find_existing(
+        company: str, source_url: str | None = None
+    ) -> list[core.VacancySummary]:
         """Check for a vacancy that might already exist before calling
         create_vacancy. Returns every vacancy under a company matching
         company (by the same rules resolve uses), unioned with every
         vacancy whose source_url matches exactly - so it still finds a
         match even when company's spelling differs from what's already
-        in the vault. Returns an empty list, never an error, when
-        nothing matches or company is ambiguous/unresolved."""
+        in the vault. source_url may be omitted when there's none to
+        check against (e.g. a recruiter sent only a PDF) - matching
+        then relies on company alone. Returns an empty list, never an
+        error, when nothing matches or company is ambiguous/
+        unresolved."""
         return core.find_existing(company, source_url, vault=vault_path)
 
 
@@ -349,9 +354,9 @@ def _register_write_tools(server: MCPServer, vault_path: Path) -> None:
     async def create_vacancy(  # noqa: PLR0913, PLR0917 - mirrors core.create_vacancy's own signature
         company: str,
         role: str,
-        source_url: str,
         found_date: date,
         status: Status,
+        source_url: str | None = None,
         applied_date: date | None = None,
         stage_note: str | None = None,
         salary_note: str | None = None,
@@ -369,22 +374,26 @@ def _register_write_tools(server: MCPServer, vault_path: Path) -> None:
         applied_date when the source has no found date recorded (e.g.
         an old tracker that only logged when you applied); tag such
         records "migrated" so they're identifiable afterwards.
+        source_url may be omitted entirely when the source has no link
+        at all - e.g. a recruiter who emailed only a PDF attachment,
+        no posting URL.
 
         This tool does not deduplicate: call find_existing with the
-        same company and source_url first, and only call this tool if
-        it returns no match - two calls with the same inputs create
-        two distinct vacancies, not one."""
+        same company and source_url first (or just company, when
+        there's no source_url to check against), and only call this
+        tool if it returns no match - two calls with the same inputs
+        create two distinct vacancies, not one."""
         path = core.create_vacancy(
             company,
             role,
-            source_url,
             found_date,
             status,
-            applied_date,
-            stage_note,
-            salary_note,
-            recruiter,
-            tags,
+            source_url=source_url,
+            applied_date=applied_date,
+            stage_note=stage_note,
+            salary_note=salary_note,
+            recruiter=recruiter,
+            tags=tags,
             vault=vault_path,
         )
         return {"path": str(path), "id": path.parent.name}

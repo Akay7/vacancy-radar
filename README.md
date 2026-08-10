@@ -13,6 +13,47 @@ implemented. Stage 9 (import) is too — conversationally, via
 importer; this project ships no spreadsheet parser or interchange
 format.
 
+## How CLI and MCP fit together
+
+Two front doors, one back end: a human runs the CLI, an LLM client
+calls MCP tools, and both go through the same `core.py` functions onto
+the same markdown vault and LanceDB index — neither interface has any
+capability, or any data, the other doesn't see.
+
+```mermaid
+flowchart TD
+    subgraph CLI["Human — terminal (vacancy-radar CLI)"]
+        direction TB
+        C1["init\ncreate the vault"]
+        C2["new\ncreate a vacancy"]
+        C3["add / note\nattach documents & notes"]
+        C4["status set\nmove it through the pipeline"]
+        C5["list / show / search\nread it back"]
+        C1 --> C2 --> C3 --> C4 --> C5
+    end
+
+    subgraph MCP["LLM client — MCP tools (vacancy-radar-mcp)"]
+        direction TB
+        M1["find_existing\ncheck before creating"]
+        M2["create_vacancy\n(conversational import)"]
+        M3["add_document / append_note"]
+        M4["set_status"]
+        M5["list_vacancies / get_vacancy / search"]
+        M1 --> M2 --> M3 --> M4 --> M5
+    end
+
+    C5 --> Vault[("Markdown vault\n+ LanceDB index")]
+    M5 --> Vault
+```
+
+`init` and `reindex` are CLI-only (see their sections below for why);
+everything else on both sides is the same underlying operation,
+exposed twice. The CLI trusts the human typing the command; the MCP
+tools add the extra checks a model calling them unsupervised needs —
+`create_vacancy` never deduplicates on its own (call `find_existing`
+first), and every typed error comes back as something the model reads
+and can act on in the same turn, not a crash.
+
 ## Install
 
 ```bash
@@ -93,14 +134,18 @@ uv run vacancy-radar status set 2022-03-22-acme-corp-backend-engineer \
 uv run vacancy-radar status set 2022-03-22-acme-corp-backend-engineer \
     found --force
 
-# File a document (posting, email, note, or takehome) from a file or
-# stdin. --external-id makes re-filing the same source (e.g. the same
-# email thread) a no-op instead of a duplicate.
+# File a *text* document (posting, email, note, or takehome) from a
+# file or stdin. --external-id makes re-filing the same source (e.g.
+# the same email thread) a no-op instead of a duplicate. `--file`/
+# `--stdin` read UTF-8 text - binary content (a PDF) fails with a
+# clear error naming the alternative below, not a crash.
 uv run vacancy-radar add 2022-03-22-acme-corp-backend-engineer \
     --kind email --title "Recruiter reply" --date 2026-01-16 \
     --external-id gmail-thread-42 --stdin < email.txt
 
-# Create a new vacancy (and its company directory, if new).
+# Create a new vacancy (and its company directory, if new). --url is
+# optional - omit it when the source has no link at all (e.g. a
+# recruiter sent only a PDF attachment).
 uv run vacancy-radar new --company "Acme Corp" --role "Backend Engineer" \
     --url https://jobs.acme.example/1 --found-date 2026-01-10
 
@@ -108,7 +153,35 @@ uv run vacancy-radar new --company "Acme Corp" --role "Backend Engineer" \
 # ordinary use - every write above already reindexes its own effect
 # eagerly, before returning, so it's searchable immediately.
 uv run vacancy-radar reindex
+
+# Extract text from any PDF under documents/ into a git-tracked
+# <filename>.pdf.md sidecar, so it's searchable by content, not only
+# by filename. Off by default - a build never silently creates sidecar
+# files; pass this explicitly whenever a PDF was added or changed.
+uv run vacancy-radar reindex --extract-sidecars
 ```
+
+#### Attaching a PDF
+
+There is no CLI command for filing a PDF the way `add` files text -
+copy it directly into the vacancy's `documents/` directory, then
+reindex with extraction:
+
+```bash
+cp ~/Downloads/posting.pdf \
+    /path/to/vault/acme-corp/2022-03-22-acme-corp-backend-engineer/documents/
+uv run vacancy-radar reindex --extract-sidecars
+```
+
+This registers the PDF as a document (`kind: takehome`, `title` set to
+the filename, `date` set to the vacancy's `found_date` - none
+independently settable this way; a posting or interview-prep PDF is
+filed the same way, just under that `kind`) and writes a
+`<filename>.pdf.md` sidecar containing its extracted text, so it's
+searchable by content afterward. An encrypted or unparseable PDF fails
+extraction without crashing the reindex - a warning naming the file
+prints in `reindex`'s output (and appears under `--json`'s `warnings`
+field too).
 
 ## MCP server
 
