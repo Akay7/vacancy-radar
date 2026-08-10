@@ -1,0 +1,149 @@
+name: Release
+
+# Tag pushes cut a real release; workflow_dispatch is the dry-run path
+# and defaults to TestPyPI so a manual click can never publish to PyPI
+# by accident. Both paths run the identical build -> verify -> publish
+# chain, so the dry run exercises this file and not a copy of it.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Package index to publish to"
+        type: choice
+        options:
+          - testpypi
+          - pypi
+        default: testpypi
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Read the built version
+        id: version
+        run: |
+          set -euo pipefail
+          # Read it back out of the built artifact rather than parsing
+          # pyproject.toml, so the check is against what would actually
+          # be uploaded.
+          version="$(ls dist/*.whl | head -1 | sed -E 's/.*-([0-9][^-]*)-py3.*/\1/')"
+          if [ -z "$version" ]; then
+            echo "could not determine the built version from dist/" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "built version: $version"
+
+      # Only tag runs have a tag to agree with; a dispatch dry run does
+      # not need one.
+      - name: Check the tag matches the built version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          built_version="${{ steps.version.outputs.version }}"
+          if [ "$tag_version" != "$built_version" ]; then
+            echo "tag $GITHUB_REF_NAME implies version $tag_version," \
+                 "but the built distribution is $built_version." >&2
+            echo "Bump [project].version in pyproject.toml, or retag." >&2
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME agrees with built version $built_version"
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # Deliberately no checkout: the wheel must install and run with no
+      # repo on the path and no uv.lock to resolve from, which is the
+      # only way an under-specified dependency floor surfaces before a
+      # user hits it.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Install the built wheel into a clean environment
+        run: |
+          set -euo pipefail
+          uv venv .verify-venv
+          uv pip install --python .verify-venv/bin/python "$(ls dist/*.whl)"
+
+      - name: vacancy-radar --version reports the built version
+        run: |
+          set -euo pipefail
+          output="$(.verify-venv/bin/vacancy-radar --version)"
+          echo "$output"
+          case "$output" in
+            *"${{ needs.build.outputs.version }}"*) ;;
+            *)
+              echo "expected version ${{ needs.build.outputs.version }}" \
+                   "in --version output" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: vacancy-radar-mcp --help exits 0
+        run: .verify-venv/bin/vacancy-radar-mcp --help
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    # Trusted Publishing: the OIDC token is minted per run and exchanged
+    # with the index for an upload token good for minutes. No PyPI
+    # token, username, or password exists anywhere in this repo.
+    permissions:
+      id-token: write
+    # The environment name is half of what PyPI's Trusted Publisher
+    # matches on (with repo and workflow filename) - see
+    # docs/releasing.md. It is also where a required-reviewer rule can
+    # be attached without editing this file.
+    environment: ${{ inputs.target || 'pypi' }}
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.12"
+
+      # The same artifact the verify job installed and ran - not a
+      # rebuild, so what was tested is byte-identical to what ships.
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish to TestPyPI
+        if: inputs.target == 'testpypi'
+        run: uv publish --publish-url https://test.pypi.org/legacy/ dist/*
+
+      - name: Publish to PyPI
+        if: inputs.target != 'testpypi'
+        run: uv publish dist/*

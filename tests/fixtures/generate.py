@@ -395,7 +395,13 @@ def _write_vault(
     vacancy_records: list[dict[str, object]],
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / VAULT_MARKER_DIRNAME).mkdir(parents=True, exist_ok=True)
+    marker_dir = output_dir / VAULT_MARKER_DIRNAME
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    # The marker is empty by design, but git cannot track an empty
+    # directory - without this placeholder the committed fixture vault
+    # at tests/fixtures/vault/ loses its marker on a fresh checkout and
+    # every test against it fails with VaultNotFoundError.
+    (marker_dir / ".gitkeep").touch()
 
     for info in companies.values():
         company_dir = output_dir / str(info["slug"])

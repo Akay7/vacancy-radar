@@ -1,10 +1,32 @@
 [project]
 name = "vacancy-radar"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local-first job application tracker with hybrid search and an MCP server."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Egor Poderiagin", email = "egor@crazyrussian.pro" },
+]
+keywords = [
+    "job-search",
+    "job-tracker",
+    "markdown",
+    "mcp",
+    "hybrid-search",
+    "lancedb",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+    "Topic :: Text Processing :: Indexing",
+]
 dependencies = [
     "typer>=0.27.1",
     "rich>=15.0.0",
@@ -16,6 +38,11 @@ dependencies = [
     "pypdf>=6.14.2",
     "mcp>=2.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Akay7/vacancy-radar"
+Repository = "https://github.com/Akay7/vacancy-radar"
+Issues = "https://github.com/Akay7/vacancy-radar/issues"
 
 [project.scripts]
 vacancy-radar = "vacancy_radar.cli:app"
@@ -30,11 +57,30 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+# >=1.27 emits PEP 639 metadata: `license = "MIT"` as License-Expression
+# and `license-files` into .dist-info/licenses/.
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vacancy_radar"]
+
+# Explicit, or hatchling sweeps in every non-gitignored path at the repo
+# root - agent tooling, .opencode/node_modules, editor config - and the
+# sdist becomes megabytes of things nobody installing this needs.
+[tool.hatch.build.targets.sdist]
+# Leading slashes anchor at the repo root - unanchored, `tests` and
+# `LICENSE` also match those names nested anywhere below it.
+include = [
+    "/src/vacancy_radar",
+    "/tests",
+    "/eval",
+    "/docs",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
 
 [tool.ruff]
 line-length = 88

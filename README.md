@@ -56,9 +56,43 @@ and can act on in the same turn, not a crash.
 
 ## Install
 
+### Use it
+
+You need [uv](https://docs.astral.sh/uv/). Nothing else — no clone, no
+`uv.lock`.
+
+```bash
+# Run it once, without installing anything permanently.
+uvx vacancy-radar --version
+
+# Or put `vacancy-radar` on PATH for good.
+uv tool install vacancy-radar
+```
+
+The MCP server ships in the same distribution, but its script name
+differs from the distribution name, so it needs `--from` (see
+[MCP server](#mcp-server) below for the client config):
+
+```bash
+uvx --from vacancy-radar vacancy-radar-mcp --vault /path/to/vault
+```
+
+**Expect the first run to be slow.** The dependency set is large
+(`lancedb` and `fastembed` are hundreds of megabytes resolved), and the
+first `search` downloads an embedding model on top of that. Both are
+cached afterward — a slow first run is the download, not a hang.
+
+### Work on it
+
+For contributing to vacancy-radar itself, from a clone:
+
 ```bash
 uv sync --all-groups
 ```
+
+Every command example below is written in this contributor form, with a
+`uv run` prefix. **If you installed the tool, drop the `uv run`** —
+`uv run vacancy-radar list` becomes `vacancy-radar list`.
 
 ## Getting started
 
@@ -190,46 +224,49 @@ calls, as MCP tools/resources/prompts over stdio, for any MCP client
 (Claude Desktop, etc.) - see `openspec/changes/mcp-server/design.md`
 for the full rationale.
 
-From a clone of this repo (after `uv sync --all-groups`, see Install
-above):
-
-```bash
-uv run vacancy-radar-mcp --vault /path/to/vault
-```
-
-For an MCP client (Claude Desktop, etc.), install it as a `uv` tool
-from the clone instead, so the client can launch it as a plain command
-without knowing about the repo or `uv run`:
-
-```bash
-cd /path/to/vacancy-radar
-uv tool install .
-# puts vacancy-radar and vacancy-radar-mcp on PATH
-```
-
-Then point the client's server config at that command, e.g. Claude
-Desktop's `claude_desktop_config.json`:
+Point your client at the published distribution — no clone required.
+For Claude Desktop, that is `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "vacancy-radar": {
-      "command": "vacancy-radar-mcp",
-      "args": ["--vault", "/path/to/vault"]
+      "command": "uvx",
+      "args": [
+        "--from", "vacancy-radar",
+        "vacancy-radar-mcp",
+        "--vault", "/path/to/vault"
+      ]
     }
   }
 }
 ```
 
+`--from vacancy-radar` is required, not decorative: `uvx` resolves a
+*distribution* named after the command it is given, and the script here
+is `vacancy-radar-mcp` while the distribution is `vacancy-radar`. A
+bare `uvx vacancy-radar-mcp` looks for a distribution that does not
+exist.
+
 For Claude Code, register the same command with `claude mcp add`
 instead of editing JSON by hand:
 
 ```bash
-claude mcp add vacancy-radar -- vacancy-radar-mcp --vault /path/to/vault
+claude mcp add vacancy-radar -- \
+    uvx --from vacancy-radar vacancy-radar-mcp --vault /path/to/vault
 ```
 
-Re-run `uv tool install --reinstall .` after pulling new commits to
-pick up code changes.
+If you have installed it persistently with `uv tool install
+vacancy-radar`, `vacancy-radar-mcp` is already on PATH and the config's
+`command` can be that directly, with just `["--vault", "/path/to/vault"]`
+as args.
+
+Working on the server itself, from a clone (after `uv sync
+--all-groups`):
+
+```bash
+uv run vacancy-radar-mcp --vault /path/to/vault
+```
 
 **Vault path**: `--vault` if given, else the `VAULT_PATH` environment
 variable; neither present fails startup naming both. MCP's client-
