@@ -1,10 +1,11 @@
 # mcp-read-tools
 
 ## Purpose
-Defines the MCP server's six read-only tools — `list_vacancies`,
-`get_company`, `get_vacancy`, `search`, `read_document`, `resolve` — each a
-thin delegation to a single `core.py` call, with schemas that mirror
-`core.py`'s own parameter names, defaults, and `models.py`-derived enums.
+Defines the MCP server's seven read-only tools — `list_vacancies`,
+`get_company`, `get_vacancy`, `search`, `read_document`, `resolve`,
+`find_existing` — each a thin delegation to a single `core.py` call, with
+schemas that mirror `core.py`'s own parameter names, defaults, and
+`models.py`-derived enums.
 
 ## Requirements
 
@@ -12,9 +13,9 @@ thin delegation to a single `core.py` call, with schemas that mirror
 Each read tool SHALL, with `core.py` mocked, call exactly one `core.py`
 function and return that call's result unmodified apart from
 serialization: `list_vacancies`, `get_company`, `get_vacancy`,
-`search`, `read_document`, `resolve`. Neither the tool module nor any
-tool handler SHALL contain filtering, sorting, path manipulation, or
-other business rules of its own.
+`search`, `read_document`, `resolve`, `find_existing`. Neither the tool
+module nor any tool handler SHALL contain filtering, sorting, path
+manipulation, or other business rules of its own.
 
 #### Scenario: list_vacancies tool delegates to core.list_vacancies
 - **GIVEN** `core.list_vacancies` is mocked to return a fixed list of
@@ -63,6 +64,15 @@ other business rules of its own.
   and the tool result matches the mocked resolution, serialized,
   unmodified
 
+#### Scenario: find_existing tool delegates to core.find_existing
+- **GIVEN** `core.find_existing` is mocked to return a fixed list of
+  `VacancySummary` rows
+- **WHEN** the `find_existing` tool is called with `company="Acme"`,
+  `source_url="https://acme.example/1"`
+- **THEN** `core.find_existing` is called exactly once with
+  `company="Acme"`, `source_url="https://acme.example/1"` and the tool
+  result contains the mocked rows, serialized, unmodified
+
 ### Requirement: read tool argument names match core.py parameter names
 Every argument a read tool's schema declares SHALL share its name with
 the `core.py` parameter it is passed as — no tool SHALL rename, alias,
@@ -83,16 +93,21 @@ or restructure an argument on its way into the matching `core.py` call.
   `company_slug` parameter, its one intentional exception (documented
   alongside the schema)
 
+#### Scenario: find_existing tool argument names match core.find_existing's signature
+- **WHEN** the `find_existing` tool's schema is inspected
+- **THEN** its parameter names are exactly `{company, source_url}`,
+  matching `core.find_existing`'s own parameter names exactly
+
 ### Requirement: every read tool exposes a valid JSON schema
-Each of the six read tools SHALL declare an `inputSchema` that is valid
-JSON Schema, listed in the server's `tools/list` response.
+Each of the seven read tools SHALL declare an `inputSchema` that is
+valid JSON Schema, listed in the server's `tools/list` response.
 
 #### Scenario: every read tool's schema validates as JSON Schema
 - **WHEN** the server's `tools/list` response is fetched
 - **THEN** each of `list_vacancies`, `get_company`, `get_vacancy`,
-  `search`, `read_document`, `resolve` is present, and each one's
-  `inputSchema` validates successfully against the JSON Schema
-  meta-schema
+  `search`, `read_document`, `resolve`, `find_existing` is present, and
+  each one's `inputSchema` validates successfully against the JSON
+  Schema meta-schema
 
 ### Requirement: enum-typed read tool parameters enumerate permitted values from models.py
 An enum-typed read tool parameter SHALL declare its permitted values
@@ -144,14 +159,14 @@ handler.
 - **THEN** the tool call returns without raising, and the tool result
   reports an error naming `EntityNotFoundError`
 
-### Requirement: the six read tools carry readOnlyHint true
+### Requirement: the seven read tools carry readOnlyHint true
 Each read tool SHALL declare `annotations.readOnlyHint = true`:
 `list_vacancies`, `get_company`, `get_vacancy`, `search`,
-`read_document`, and `resolve`.
+`read_document`, `resolve`, and `find_existing`.
 
 #### Scenario: every read tool's annotations report readOnlyHint true
 - **WHEN** the server's `tools/list` response is fetched
-- **THEN** each of the six read tools' `annotations.readOnlyHint` is
+- **THEN** each of the seven read tools' `annotations.readOnlyHint` is
   `true`
 
 ### Requirement: get_company returns counts and paths, never document bodies
@@ -199,3 +214,46 @@ file's contents, when `path` resolves outside the active vault.
   resolves to `/outside/secret.md` (e.g. via `../` segments)
 - **THEN** the tool result reports a typed error (`PathOutsideVaultError`)
   and does not include that file's contents
+
+### Requirement: find_existing tool returns matches for a company that exists
+The `find_existing` tool SHALL return a company's vacancies when the
+given `company` resolves to that existing company.
+
+#### Scenario: An existing company's vacancies are returned through the tool
+- **GIVEN** a vault company with vacancies
+- **WHEN** the `find_existing` tool is called with that company's name
+  and a `source_url` matching none of them
+- **THEN** the tool result contains that company's vacancies
+
+### Requirement: find_existing tool returns an empty list for a company that does not exist
+The `find_existing` tool SHALL return an empty list, not a typed
+error, when `company` resolves to no company and `source_url` matches
+no vacancy.
+
+#### Scenario: A nonexistent company with no matching source_url returns empty through the tool
+- **WHEN** the `find_existing` tool is called with a company name
+  matching nothing in the vault and a `source_url` matching no vacancy
+- **THEN** the tool result is an empty list
+
+### Requirement: find_existing tool's source_url parameter is optional
+Calling the `find_existing` tool with no `source_url` argument SHALL
+still return matches from the company tier, mirroring
+`core.find_existing`'s own optional default.
+
+#### Scenario: Omitting source_url through the tool still matches by company
+- **GIVEN** a vault company with vacancies
+- **WHEN** the `find_existing` tool is called with that company's name
+  and no `source_url` argument
+- **THEN** the tool result contains that company's vacancies
+
+### Requirement: find_existing tool matches on source_url across differing company spellings
+The `find_existing` tool SHALL return a vacancy whose `source_url`
+matches the given `source_url`, even when the given `company` argument
+does not resolve to that vacancy's own company.
+
+#### Scenario: A differently-spelled company argument still matches through the tool
+- **GIVEN** a vacancy filed under one company spelling, with a known
+  `source_url`
+- **WHEN** the `find_existing` tool is called with a differently-spelled
+  `company` argument and that vacancy's exact `source_url`
+- **THEN** the tool result contains that vacancy's summary

@@ -55,3 +55,53 @@ separate `reindex` call.
 - **WHEN** `create_vacancy` is called and returns successfully
 - **THEN** a `search` call in the same process against its role or
   company text returns it as a hit
+
+### Requirement: create_vacancy accepts an optional source_url
+`create_vacancy` SHALL accept `source_url` as an optional parameter
+(`str | None`, defaulting to `None`), forwarded to the created
+`Vacancy` unchanged. No new validation is added beyond what `Vacancy`'s
+existing field validator already enforces when a value is given (must
+be `http` or `https`).
+
+#### Scenario: create_vacancy without source_url creates a vacancy with none
+- **WHEN** `create_vacancy` is called with no `source_url` argument
+- **THEN** the created vacancy's `source_url` is absent from its
+  frontmatter
+
+#### Scenario: create_vacancy with a valid source_url stores it unchanged
+- **WHEN** `create_vacancy` is called with a valid `http`/`https`
+  `source_url`
+- **THEN** the created vacancy's frontmatter carries that `source_url`
+  unchanged
+
+#### Scenario: create_vacancy with an invalid-scheme source_url still raises
+- **WHEN** `create_vacancy` is called with a `source_url` whose scheme
+  is not `http` or `https`
+- **THEN** `InvalidVacancyDataError` is raised and no company directory
+  or vacancy file is created
+
+### Requirement: create_vacancy accepts stage_note, salary_note, recruiter, and tags as optional creation-time fields
+`create_vacancy` SHALL accept four additional optional keyword
+parameters — `stage_note`, `salary_note`, `recruiter` (each `str |
+None`, defaulting to `None`), and `tags` (`list[str] | None`,
+defaulting to `None` and treated as empty when omitted) — and forward
+each to the created `Vacancy`'s corresponding field unchanged. No new
+validation is added beyond what `Vacancy`'s existing field and model
+validators already enforce for these fields.
+
+#### Scenario: Provided optional fields are stored on the created vacancy
+- **WHEN** `create_vacancy` is called with `stage_note`, `salary_note`,
+  `recruiter`, and `tags` all provided
+- **THEN** the created vacancy's frontmatter carries each value
+  unchanged
+
+#### Scenario: Omitted tags default to an empty list
+- **WHEN** `create_vacancy` is called with no `tags` argument
+- **THEN** the created vacancy's `tags` field is an empty list, the
+  same default `Vacancy` itself uses when `tags` is unset
+
+#### Scenario: Omitted stage_note, salary_note, and recruiter are absent
+- **WHEN** `create_vacancy` is called with no `stage_note`,
+  `salary_note`, or `recruiter` argument
+- **THEN** the created vacancy's frontmatter carries none of those
+  three fields

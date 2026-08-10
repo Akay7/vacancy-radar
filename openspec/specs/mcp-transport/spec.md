@@ -4,7 +4,7 @@
 Defines the MCP server's stdio transport hygiene, startup performance, and
 tool-surface shape: clean JSON-RPC framing on stdout, diagnostics on
 stderr, no eager embedding-model load, `openWorldHint=false` on every tool,
-exactly the nine specified tools, and typed errors surfaced as tool
+exactly the eleven specified tools, and typed errors surfaced as tool
 results rather than protocol-level errors.
 
 ## Requirements
@@ -75,24 +75,31 @@ Every tool the server lists SHALL declare
 - **WHEN** the server's `tools/list` response is fetched
 - **THEN** every listed tool's `annotations.openWorldHint` is `false`
 
-### Requirement: the tool list contains exactly the nine specified tools, excluding reindex, create_vacancy, and any import/exec/query tool
+### Requirement: the tool list contains exactly the eleven specified tools, excluding reindex and any import/exec/query tool
 The server's `tools/list` response SHALL list exactly
 `list_vacancies`, `get_company`, `get_vacancy`, `search`,
-`read_document`, `resolve`, `append_note`, `set_status`,
-`add_document` — nine tools, no more, no fewer. It SHALL NOT list
-`reindex`, `create_vacancy`, any stage 9 import/migration capability,
-or any generic query/eval/exec tool.
+`read_document`, `resolve`, `find_existing`, `append_note`,
+`set_status`, `add_document`, `create_vacancy` — eleven tools, no more,
+no fewer. It SHALL NOT list `reindex`, any stage-9-style bulk migration
+capability beyond `create_vacancy` itself, or any generic
+query/eval/exec tool.
 
-#### Scenario: the tool list is exactly the nine specified tools
+#### Scenario: the tool list is exactly the eleven specified tools
 - **WHEN** the server's `tools/list` response is fetched
 - **THEN** the set of listed tool names equals exactly
   `{list_vacancies, get_company, get_vacancy, search, read_document,
-  resolve, append_note, set_status, add_document}`
+  resolve, find_existing, append_note, set_status, add_document,
+  create_vacancy}`
 
-#### Scenario: reindex and create_vacancy are absent
+#### Scenario: reindex is absent
 - **WHEN** the server's `tools/list` response is fetched
-- **THEN** no listed tool is named `reindex` or `create_vacancy`, and
-  no listed tool accepts a generic query, expression, or code argument
+- **THEN** no listed tool is named `reindex`, and no listed tool
+  accepts a generic query, expression, or code argument
+
+#### Scenario: create_vacancy and find_existing are present
+- **WHEN** the server's `tools/list` response is fetched
+- **THEN** tools named `create_vacancy` and `find_existing` are both
+  present in the listed set
 
 ### Requirement: a core.py typed error surfaces as a structured tool-result error, not a protocol-level error
 The server SHALL catch any typed error a `core.py`, `config.py`, or
