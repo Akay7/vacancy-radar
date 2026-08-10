@@ -4,43 +4,10 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/), and this
 project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.0] - 2026-08-10
 
-### Added
-
-- Published to PyPI. `uvx vacancy-radar` and `uv tool install
-  vacancy-radar` expose the CLI, and `uvx --from vacancy-radar
-  vacancy-radar-mcp` the MCP server, with no clone and no `uv.lock`.
-- Complete distribution metadata — authors, keywords, classifiers,
-  project URLs, and an SPDX `MIT` license expression with the LICENSE
-  file shipped in both the wheel and the sdist.
-- `.github/workflows/release.yml`: a tag-triggered release that builds
-  once, verifies the built wheel by installing and running it in a
-  clean environment with no repository checkout, and only then uploads
-  it via PyPI Trusted Publishing. No index credential is stored
-  anywhere. A `workflow_dispatch` input runs the same chain against
-  TestPyPI as a dry run.
-- `tests/test_packaging.py`: asserts the built distribution's entry
-  points, license file, and landing-page metadata on every test run, so
-  a packaging regression fails CI instead of degrading a release.
-- [docs/releasing.md](docs/releasing.md): Trusted Publisher setup, the
-  per-release procedure, the TestPyPI dry run, and recovery when a bad
-  version reaches an index.
-
-### Changed
-
-- The README's install section leads with the published distribution;
-  the `uv sync --all-groups` checkout is relabelled as the contributor
-  path. The MCP section documents a copy-pasteable client config using
-  `uvx --from vacancy-radar`.
-- The sdist is built from an explicit include list. The default swept
-  in agent tooling and `.opencode/node_modules`, making it 4.9 MB
-  across 1905 files; it is now 143 KB across 212.
-
-## [0.1.0] - 2026-08-04
-
-First working version: a local-first job application tracker built
-around a markdown vault, with hybrid search and an MCP server.
+First release: a local-first job application tracker built around a
+markdown vault, with hybrid search and an MCP server.
 
 ### Added
 
@@ -76,8 +43,24 @@ around a markdown vault, with hybrid search and an MCP server.
 - **Conversational import** via `find_existing` + `create_vacancy`, for
   moving an existing tracker into a vault by talking to a model. See
   [docs/import-guide.md](docs/import-guide.md).
+- **Published to PyPI.** `uvx vacancy-radar` and `uv tool install
+  vacancy-radar` expose the CLI, and `uvx --from vacancy-radar
+  vacancy-radar-mcp` the MCP server — no clone and no `uv.lock`
+  required. The distribution carries full landing-page metadata and an
+  SPDX `MIT` license expression, with the LICENSE file shipped in both
+  the wheel and the sdist.
+- **Release automation** (`.github/workflows/release.yml`): a
+  tag-triggered release that builds once, verifies the built wheel by
+  installing and running it in a clean environment with no repository
+  checkout, and only then uploads it via PyPI Trusted Publishing. No
+  index credential is stored anywhere. A `workflow_dispatch` input runs
+  the same chain against TestPyPI as a dry run. See
+  [docs/releasing.md](docs/releasing.md).
+- **Packaging test** (`tests/test_packaging.py`): asserts the built
+  distribution's entry points, license file, and landing-page metadata
+  on every test run, so a packaging regression fails CI instead of
+  degrading a release.
 - CI on pushes to `main` and pull requests: pre-commit hooks and the
   full test suite, with the embedding model cached by model name.
 
-[Unreleased]: https://github.com/Akay7/vacancy-radar/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.1.0

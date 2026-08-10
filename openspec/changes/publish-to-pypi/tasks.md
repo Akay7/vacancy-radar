@@ -116,7 +116,9 @@
 - [ ] 5.6 Deliberately verify the failure path once: dispatch or tag
       with a mismatched version and confirm the run aborts before any
       upload
-- [ ] 5.7 Tag `v0.1.1` (or the agreed first published version), push,
+- [ ] 5.7 Tag `v0.1.0` (the agreed first published version; the stale
+      `v0.1.0` local tag from the abandoned FastAPI lineage is deleted
+      first — it was never pushed), push,
       and confirm the PyPI project page renders the README, license,
       and links
 - [ ] 5.8 From a machine with no checkout, confirm `uvx vacancy-radar
