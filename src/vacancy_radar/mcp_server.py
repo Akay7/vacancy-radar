@@ -155,9 +155,12 @@ def build_server(vault_path: Path) -> MCPServer:
         instructions=(
             "Tools for a local-first job application vault: read vacancies, "
             "companies, and documents; search the vault; append notes, "
-            "change status, and file documents. Bulk/structural operations "
-            "(reindexing, creating a new vacancy) are intentionally not "
-            "exposed here - use the vacancy-radar CLI for those."
+            "change status, file documents, and create new vacancies "
+            "(e.g. when importing an existing tracker conversationally - "
+            "see create_vacancy's own description). Reindexing is "
+            "intentionally not exposed here - use `vacancy-radar reindex` "
+            "if that's ever needed; every write tool already refreshes "
+            "the index itself."
         ),
     )
 
@@ -271,6 +274,18 @@ def _register_read_tools(server: MCPServer, vault_path: Path) -> None:
         one."""
         return core.resolve(query, vault=vault_path)
 
+    @server.tool(annotations=_READ_ONLY)
+    @_delegate
+    async def find_existing(company: str, source_url: str) -> list[core.VacancySummary]:
+        """Check for a vacancy that might already exist before calling
+        create_vacancy. Returns every vacancy under a company matching
+        company (by the same rules resolve uses), unioned with every
+        vacancy whose source_url matches exactly - so it still finds a
+        match even when company's spelling differs from what's already
+        in the vault. Returns an empty list, never an error, when
+        nothing matches or company is ambiguous/unresolved."""
+        return core.find_existing(company, source_url, vault=vault_path)
+
 
 # --- Write tools -----------------------------------------------------------
 
@@ -328,6 +343,51 @@ def _register_write_tools(server: MCPServer, vault_path: Path) -> None:
         return core.add_document(
             vacancy_id, kind, content, title, date, external_id, vault=vault_path
         )
+
+    @server.tool(annotations=_WRITE)
+    @_delegate
+    async def create_vacancy(  # noqa: PLR0913, PLR0917 - mirrors core.create_vacancy's own signature
+        company: str,
+        role: str,
+        source_url: str,
+        found_date: date,
+        status: Status,
+        applied_date: date | None = None,
+        stage_note: str | None = None,
+        salary_note: str | None = None,
+        recruiter: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Create a new vacancy, and its company directory if one
+        doesn't exist yet. This tool exists for conversational import:
+        the caller (you) is responsible for mapping a source record's
+        fields onto this schema before calling it.
+
+        Use role="unknown" when no job title is available in the
+        source, and tag such vacancies "needs_review" so a human can
+        revisit them later. found_date may be synthesized from
+        applied_date when the source has no found date recorded (e.g.
+        an old tracker that only logged when you applied); tag such
+        records "migrated" so they're identifiable afterwards.
+
+        This tool does not deduplicate: call find_existing with the
+        same company and source_url first, and only call this tool if
+        it returns no match - two calls with the same inputs create
+        two distinct vacancies, not one."""
+        path = core.create_vacancy(
+            company,
+            role,
+            source_url,
+            found_date,
+            status,
+            applied_date,
+            stage_note,
+            salary_note,
+            recruiter,
+            tags,
+            vault=vault_path,
+        )
+        return {"path": str(path), "id": path.parent.name}
 
 
 # --- Resources ---------------------------------------------------------

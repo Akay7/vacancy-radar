@@ -754,6 +754,77 @@ def test_add_command_json_on_fresh_filing_names_created_path(tmp_path: Path) -> 
     assert Path(payload["path"]).is_file()
 
 
+# --- Section 11b (vault-init change): init command -------------------------
+
+
+def test_init_on_new_path_reports_created(tmp_path: Path) -> None:
+    target = tmp_path / "new-vault"
+
+    result = runner.invoke(app, ["init", str(target)])
+
+    assert result.exit_code == 0
+    assert "created" in result.output
+    assert str(target) in result.output
+    assert (target / VAULT_MARKER_DIRNAME).is_dir()
+
+
+def test_init_on_already_initialized_vault_exits_zero_and_reports_no_error(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    result = runner.invoke(app, ["init", str(vault)])
+
+    assert result.exit_code == 0
+    assert "already initialized" in result.output
+
+
+def test_init_json_reports_created(tmp_path: Path) -> None:
+    target = tmp_path / "new-vault"
+
+    result = runner.invoke(app, ["init", str(target), "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["outcome"] == "created"
+    assert payload["path"] == str(target.resolve())
+
+
+def test_init_json_reports_already_initialized_outcome(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    result = runner.invoke(app, ["init", str(vault), "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["outcome"] == "already initialized"
+
+
+def test_init_omitted_path_falls_back_to_vault_path_env(tmp_path: Path) -> None:
+    target = tmp_path / "env-vault"
+
+    result = runner.invoke(app, ["init"], env={"VAULT_PATH": str(target)})
+
+    assert result.exit_code == 0
+    assert (target / VAULT_MARKER_DIRNAME).is_dir()
+
+
+def test_list_succeeds_against_a_freshly_initialized_vault(tmp_path: Path) -> None:
+    target = tmp_path / "new-vault"
+
+    init_result = runner.invoke(app, ["init", str(target)])
+    assert init_result.exit_code == 0
+
+    list_result = runner.invoke(
+        app, ["list", "--json"], env={"VAULT_PATH": str(target)}
+    )
+
+    assert list_result.exit_code == 0
+    assert json.loads(list_result.output) == []
+
+
 # --- Section 12: new command ----------------------------------------------
 
 

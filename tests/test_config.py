@@ -9,6 +9,7 @@ from vacancy_radar.config import (
     VaultNotConfiguredError,
     VaultNotFoundError,
     resolve_search_config,
+    resolve_target_path,
     resolve_vault_path,
 )
 from vacancy_radar.vault.paths import VAULT_MARKER_DIRNAME
@@ -88,6 +89,52 @@ def test_resolved_path_is_absolute_even_when_input_was_relative(
 
     assert resolved.is_absolute()
     assert resolved == relative_vault.resolve()
+
+
+# --- resolve_target_path (vault-init change) --------------------------------
+
+
+def test_resolve_target_path_explicit_overrides_vault_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_target = tmp_path / "env"
+    explicit_target = tmp_path / "explicit"
+    monkeypatch.setenv("VAULT_PATH", str(env_target))
+
+    resolved = resolve_target_path(explicit_target)
+
+    assert resolved == explicit_target.resolve()
+
+
+def test_resolve_target_path_uses_vault_path_when_no_argument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_target = tmp_path / "env"
+    monkeypatch.setenv("VAULT_PATH", str(env_target))
+
+    resolved = resolve_target_path()
+
+    assert resolved == env_target.resolve()
+
+
+def test_resolve_target_path_raises_vault_not_configured_when_neither_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VAULT_PATH", raising=False)
+
+    with pytest.raises(VaultNotConfiguredError):
+        resolve_target_path()
+
+
+def test_resolve_target_path_returns_a_path_that_does_not_exist_yet(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "does-not-exist-yet"
+
+    resolved = resolve_target_path(missing)
+
+    assert resolved == missing.resolve()
+    assert not resolved.exists()
 
 
 # --- SearchConfig / resolve_search_config (stage 4) -------------------------

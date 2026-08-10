@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from vacancy_radar import core, frontmatter
+from vacancy_radar.config import VaultNotConfiguredError
 from vacancy_radar.index import search as index_search
 from vacancy_radar.index.build import build_index
 from vacancy_radar.index.search import SearchMode
@@ -110,6 +111,91 @@ def _vacancy_summary_fields() -> set[str]:
         "last_activity",
         "document_count",
     }
+
+
+# --- Section 1b (vault-init change): init_vault() --------------------------
+
+
+def test_init_vault_creates_marker_under_new_path(tmp_path: Path) -> None:
+    target = tmp_path / "nested" / "new-vault"
+
+    result = core.init_vault(target)
+
+    assert target.is_dir()
+    assert (target / VAULT_MARKER_DIRNAME).is_dir()
+    assert result.created is True
+    assert result.path == target.resolve()
+
+
+def test_init_vault_adds_marker_to_existing_directory_without_touching_contents(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "existing"
+    target.mkdir()
+    (target / "unrelated.txt").write_text("keep me", encoding="utf-8")
+
+    result = core.init_vault(target)
+
+    assert (target / VAULT_MARKER_DIRNAME).is_dir()
+    assert (target / "unrelated.txt").read_text(encoding="utf-8") == "keep me"
+    assert result.created is True
+
+
+def test_init_vault_is_a_noop_on_already_initialized_vault(tmp_path: Path) -> None:
+    target = tmp_path / "vault"
+    _init_vault(target)
+    marker = target / VAULT_MARKER_DIRNAME
+    before_mtime = marker.stat().st_mtime_ns
+
+    result = core.init_vault(target)
+
+    assert result.created is False
+    assert marker.stat().st_mtime_ns == before_mtime
+
+
+def test_init_vault_rejects_a_file_target(tmp_path: Path) -> None:
+    target = tmp_path / "not-a-directory"
+    target.write_text("x", encoding="utf-8")
+
+    with pytest.raises(core.VaultTargetIsAFileError):
+        core.init_vault(target)
+
+    assert target.read_text(encoding="utf-8") == "x"
+    assert target.is_file()
+
+
+def test_init_vault_explicit_path_overrides_vault_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_target = tmp_path / "env"
+    explicit_target = tmp_path / "explicit"
+    monkeypatch.setenv("VAULT_PATH", str(env_target))
+
+    result = core.init_vault(explicit_target)
+
+    assert result.path == explicit_target.resolve()
+    assert not env_target.exists()
+
+
+def test_init_vault_falls_back_to_vault_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_target = tmp_path / "env"
+    monkeypatch.setenv("VAULT_PATH", str(env_target))
+
+    result = core.init_vault()
+
+    assert result.path == env_target.resolve()
+    assert (env_target / VAULT_MARKER_DIRNAME).is_dir()
+
+
+def test_init_vault_raises_typed_error_when_neither_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VAULT_PATH", raising=False)
+
+    with pytest.raises(VaultNotConfiguredError):
+        core.init_vault()
 
 
 # --- Section 2: resolve() ---------------------------------------------------
@@ -1371,6 +1457,197 @@ def test_create_vacancy_is_listed_and_searchable_immediately(tmp_path: Path) -> 
         "Distributed Systems Engineer", vault=vault, mode=SearchMode.KEYWORD
     )
     assert any(h.company == "Quokka Systems" for h in results.hits)
+
+
+# --- Section 8b (stage 9): create_vacancy's optional creation fields -------
+
+
+def test_create_vacancy_stores_optional_fields(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    path = core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        "https://jobs.acme.example/1",
+        date(2026, 1, 1),
+        Status.APPLIED,
+        applied_date=date(2026, 1, 2),
+        stage_note="Recruiter called, phone screen next week.",
+        salary_note="120-140k, quoted verbally",
+        recruiter="Jane Recruiter",
+        tags=["needs_review", "migrated"],
+        vault=vault,
+    )
+
+    text = path.read_text(encoding="utf-8")
+    metadata, _ = frontmatter.parse(text, filename=str(path))
+    assert metadata["stage_note"] == "Recruiter called, phone screen next week."
+    assert metadata["salary_note"] == "120-140k, quoted verbally"
+    assert metadata["recruiter"] == "Jane Recruiter"
+    assert metadata["tags"] == ["needs_review", "migrated"]
+
+
+def test_create_vacancy_tags_defaults_to_empty_list(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    path = core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        "https://jobs.acme.example/1",
+        date(2026, 1, 1),
+        Status.FOUND,
+        vault=vault,
+    )
+
+    snapshot = read_vault(vault)
+    vacancy_id = path.parent.name
+    assert snapshot.vacancies[vacancy_id].tags == []
+
+
+def test_create_vacancy_optional_str_fields_default_absent(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    path = core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        "https://jobs.acme.example/1",
+        date(2026, 1, 1),
+        Status.FOUND,
+        vault=vault,
+    )
+
+    text = path.read_text(encoding="utf-8")
+    metadata, _ = frontmatter.parse(text, filename=str(path))
+    assert "stage_note" not in metadata
+    assert "salary_note" not in metadata
+    assert "recruiter" not in metadata
+
+
+# --- Section 8c (stage 9): find_existing() ----------------------------------
+
+
+def test_find_existing_matches_existing_company(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        "https://jobs.acme.example/1",
+        date(2026, 1, 1),
+        Status.FOUND,
+        vault=vault,
+    )
+    core.create_vacancy(
+        "Acme Corp",
+        "Designer",
+        "https://jobs.acme.example/2",
+        date(2026, 1, 2),
+        Status.FOUND,
+        vault=vault,
+    )
+
+    matches = core.find_existing(
+        "Acme Corp", "https://jobs.acme.example/does-not-match", vault=vault
+    )
+
+    assert {m.role for m in matches} == {"Engineer", "Designer"}
+
+
+def test_find_existing_empty_for_unknown_company_and_url(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        "https://jobs.acme.example/1",
+        date(2026, 1, 1),
+        Status.FOUND,
+        vault=vault,
+    )
+
+    matches = core.find_existing(
+        "No Such Company", "https://jobs.nowhere.example/1", vault=vault
+    )
+
+    assert matches == []
+
+
+def test_find_existing_never_raises_on_ambiguous_company(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    # Two companies sharing the same display name but distinct slugs -
+    # ambiguous at resolve's case-insensitive-name tier (mirrors
+    # test_resolve's own widget-us/widget-eu collision fixture).
+    # Written directly rather than via create_vacancy, which always
+    # slugifies "Widget Inc" to the same slug and so could never
+    # produce two distinct companies with an identical display name.
+    _write_company(vault, "widget-us", "Widget Inc")
+    _write_company(vault, "widget-eu", "Widget Inc")
+    _write_vacancy(
+        vault,
+        "widget-eu",
+        "v1",
+        _simple_vacancy(
+            "v1",
+            slug="widget-eu",
+            company="Widget Inc",
+            role="Designer",
+            source_url="https://jobs.widget-eu.example/1",
+        ),
+    )
+
+    matches = core.find_existing(
+        "Widget Inc", "https://jobs.widget-eu.example/1", vault=vault
+    )
+
+    # An ambiguous company name never raises; the source_url tier
+    # still matches.
+    assert any(m.role == "Designer" for m in matches)
+
+
+def test_find_existing_matches_by_source_url_across_company_spellings(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        "https://jobs.acme.example/1",
+        date(2026, 1, 1),
+        Status.FOUND,
+        vault=vault,
+    )
+
+    matches = core.find_existing(
+        "Acme Corporation Ltd", "https://jobs.acme.example/1", vault=vault
+    )
+
+    assert [m.role for m in matches] == ["Engineer"]
+
+
+def test_find_existing_does_not_duplicate_a_vacancy_matching_both_tiers(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        "https://jobs.acme.example/1",
+        date(2026, 1, 1),
+        Status.FOUND,
+        vault=vault,
+    )
+
+    matches = core.find_existing(
+        "Acme Corp", "https://jobs.acme.example/1", vault=vault
+    )
+
+    assert len(matches) == 1
 
 
 # --- Section 14: cross-cutting failure-atomicity tests -----------------

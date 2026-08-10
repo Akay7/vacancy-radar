@@ -7,13 +7,32 @@ server exposes read/write tools to any LLM client.
 ## Status
 
 Vault, index, retrieval, CLI (read and write), and MCP server are all
-implemented. Stage 9 (xlsx import/migration) is not.
+implemented. Stage 9 (import) is too — conversationally, via
+`create_vacancy`/`find_existing` over MCP (see
+[docs/import-guide.md](docs/import-guide.md)), not an xlsx/CSV
+importer; this project ships no spreadsheet parser or interchange
+format.
 
 ## Install
 
 ```bash
 uv sync --all-groups
 ```
+
+## Getting started
+
+Every command below expects a vault to already exist at `VAULT_PATH`
+(or an explicit path, where the command takes one). Create one first:
+
+```bash
+uv run vacancy-radar init /path/to/vault
+export VAULT_PATH=/path/to/vault
+```
+
+`init` is idempotent - running it again against the same path is a
+no-op, not an error - and it never touches anything already in a
+directory it adopts (see [design.md](openspec/changes/vault-init/
+design.md) for the full rationale).
 
 ## Usage
 
@@ -110,7 +129,7 @@ default (2026-07-28, SEP-2577), so `--vault`/`VAULT_PATH` are the only
 two ways to point the server at a vault, exactly like configuring any
 other stdio MCP server.
 
-**Nine tools**, matching `core.py`'s functions one for one - argument
+**Eleven tools**, matching `core.py`'s functions one for one - argument
 marshalling only, no filtering/sorting/business logic of its own:
 
 | tool | delegates to |
@@ -121,20 +140,27 @@ marshalling only, no filtering/sorting/business logic of its own:
 | `search` | `core.search` |
 | `read_document` | `core.read_document` |
 | `resolve` | `core.resolve` |
+| `find_existing` | `core.find_existing` |
 | `append_note` | `core.append_note` |
 | `set_status` | `core.set_status` |
 | `add_document` | `core.add_document` |
+| `create_vacancy` | `core.create_vacancy` |
 
-`reindex` and `create_vacancy` are deliberately **not** exposed - bulk
-and structural operations stay at the CLI, where a human reviews the
-outcome (design.md's exposure decision). `search`'s description tells
-the model to prefer `mode="keyword"` for exact-name/proper-noun
-queries and leave `mode` unset (hybrid) otherwise, citing the measured
-numbers in "Retrieval evaluation" below - without that guidance a model
-defaults to hybrid for everything and the per-category tuning goes
-unused. A typed `core.py` error (an ambiguous match, an invalid status
-transition, a nonexistent vacancy) surfaces as a structured tool result
-the calling model can read and act on, never a raw crash.
+`reindex` is deliberately **not** exposed - every write tool already
+refreshes the index itself, and there's no legitimate reason for a
+client-connected model to trigger a full rebuild (design.md's exposure
+decision). `create_vacancy` *is* exposed, for conversational import
+(see [docs/import-guide.md](docs/import-guide.md)): it does not
+deduplicate, so its own tool description tells a calling model to call
+`find_existing` first and only create when that returns no match.
+`search`'s description tells the model to prefer `mode="keyword"` for
+exact-name/proper-noun queries and leave `mode` unset (hybrid)
+otherwise, citing the measured numbers in "Retrieval evaluation" below
+- without that guidance a model defaults to hybrid for everything and
+the per-category tuning goes unused. A typed `core.py` error (an
+ambiguous match, an invalid status transition, a nonexistent vacancy)
+surfaces as a structured tool result the calling model can read and
+act on, never a raw crash.
 
 **Two resources**: `vacancy-radar://companies` (every company's slug,
 display name, and vacancy count) and `vacancy-radar://statuses` (every
@@ -222,13 +248,13 @@ change's `tasks.md` (section 5) for the full per-category sweep.
 against a synthetic, generator-produced fixture vault — not a real
 corpus of job-search correspondence. `tests/fixtures/generate.py`'s
 proper nouns, phrasing patterns, and document lengths are artifacts of
-the generator, not a sample of real vacancies, emails, or notes. A
-second eval run against a real vault after import belongs in stage 9's
-documentation; until then, treat this table as justification for a
-*default*, not a claim that generalizes — `SearchConfig`'s existing
-environment-variable overrides (`SEARCH_DEFAULT_VECTOR_WEIGHT`,
-`SEARCH_FUSION_STRATEGY`) remain the way to retune per-deployment if a
-real vault's numbers disagree.
+the generator, not a sample of real vacancies, emails, or notes. Treat
+this table as justification for a *default*, not a claim that
+generalizes. See [docs/evaluation.md](docs/evaluation.md) for the
+procedure to run a second eval against your own real vault after
+import, and for which numbers to trust when retuning
+`SEARCH_DEFAULT_VECTOR_WEIGHT`/`SEARCH_FUSION_STRATEGY` for your own
+deployment.
 
 **Future work, not built here.** `multi_result` and `temporal` recall
 suggest a reranker could help beyond what fusion-weight tuning alone

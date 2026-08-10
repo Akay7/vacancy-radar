@@ -32,7 +32,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ValidationError
 
 from vacancy_radar import frontmatter
-from vacancy_radar.config import resolve_vault_path
+from vacancy_radar.config import resolve_target_path, resolve_vault_path
 from vacancy_radar.ids import new_vacancy_id, slugify
 from vacancy_radar.index import search as index_search
 from vacancy_radar.index.build import TABLE_NAME, IndexReport, build_index
@@ -52,6 +52,7 @@ from vacancy_radar.vault.paths import (
     company_markdown_path,
     is_within,
     vacancy_markdown_path,
+    vault_marker_path,
 )
 from vacancy_radar.vault.reader import VaultSnapshot, read_vault
 
@@ -119,6 +120,56 @@ class DocumentNotFoundError(CoreError):
     def __init__(self, path: Path) -> None:
         self.path = path
         super().__init__(f"{path} does not exist or is not a file")
+
+
+class VaultTargetIsAFileError(CoreError):
+    """Raised by `init_vault` when its target path exists as a regular
+    file rather than a directory - no filesystem change is made."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(f"{path} exists and is not a directory")
+
+
+# --- Vault initialization ------------------------------------------------
+
+
+@dataclass(frozen=True)
+class VaultInitResult:
+    """`init_vault`'s result: the vault's (absolute) path, and whether
+    this call created it. `created` is `False` exactly when the target
+    was already a valid vault before this call - `init_vault` is
+    idempotent, never destructive (design.md decision 3)."""
+
+    path: Path
+    created: bool
+
+
+def init_vault(path: str | Path | None = None) -> VaultInitResult:
+    """Create a vault at `path` (or `VAULT_PATH` when `path` is
+    omitted), via `config.resolve_target_path`'s explicit-then-
+    `VAULT_PATH` precedence - the same precedence every other `core.py`
+    function uses, without requiring the target to already exist
+    (unlike `resolve_vault_path`, which every other function relies on).
+
+    Idempotent: creates the target directory (and any missing parents)
+    and its `.vacancy-radar/` marker in one step when neither exists
+    yet; adds just the marker to an existing, non-vault directory,
+    touching nothing else already there; is a no-op, `created=False`,
+    when the target is already a valid vault. Raises
+    `VaultTargetIsAFileError`, with no filesystem change, when the
+    target exists as a file. See design.md decisions 3-4."""
+    target = resolve_target_path(path)
+
+    if target.exists() and not target.is_dir():
+        raise VaultTargetIsAFileError(target)
+
+    marker = vault_marker_path(target)
+    if marker.is_dir():
+        return VaultInitResult(path=target, created=False)
+
+    marker.mkdir(parents=True, exist_ok=True)
+    return VaultInitResult(path=target, created=True)
 
 
 # --- Resolution --------------------------------------------------------
@@ -1072,6 +1123,10 @@ def create_vacancy(  # noqa: PLR0913, PLR0917 - the deliverable's public signatu
     found_date: date,
     status: Status | str,
     applied_date: date | None = None,
+    stage_note: str | None = None,
+    salary_note: str | None = None,
+    recruiter: str | None = None,
+    tags: list[str] | None = None,
     *,
     vault: Path | None = None,
 ) -> Path:
@@ -1082,7 +1137,11 @@ def create_vacancy(  # noqa: PLR0913, PLR0917 - the deliverable's public signatu
     leaves an existing company's `_company.md` untouched (design.md
     decision 8). Never overwrites anything - `new_vacancy_id`'s
     suffixing means a second call with the same inputs mints a distinct
-    id, not a collision. Refreshes the index before returning."""
+    id, not a collision. `stage_note`/`salary_note`/`recruiter`/`tags`
+    are optional and forwarded to `Vacancy` unchanged (`tags` defaults
+    to an empty list, matching `Vacancy`'s own default, when omitted) -
+    see the llm-import change's design.md decision 5. Refreshes the
+    index before returning."""
     vault_root = resolve_vault_path(vault)
     snapshot = read_vault(vault_root)
 
@@ -1104,6 +1163,10 @@ def create_vacancy(  # noqa: PLR0913, PLR0917 - the deliverable's public signatu
             status=target_status,
             found_date=found_date,
             applied_date=applied_date,
+            stage_note=stage_note,
+            salary_note=salary_note,
+            recruiter=recruiter,
+            tags=tags or [],
         )
     except ValueError as exc:
         # pydantic.ValidationError subclasses ValueError, so this catches
@@ -1131,3 +1194,37 @@ def create_vacancy(  # noqa: PLR0913, PLR0917 - the deliverable's public signatu
 
     reindex(vault=vault_root)
     return vacancy_md_path
+
+
+# --- Writing: find_existing() --------------------------------------------
+
+
+def find_existing(
+    company: str, source_url: str, vault: Path | None = None
+) -> list[VacancySummary]:
+    """Best-effort pre-check for `create_vacancy` callers: every vacancy
+    matching `company` (via `resolve`'s own, non-raising company-tier
+    matching) unioned with every vacancy whose `source_url` equals the
+    given one exactly, deduplicated. Never raises - an unresolved or
+    ambiguous `company` simply contributes no rows from that tier
+    (llm-import change's design.md decisions 2-3); a `source_url` match
+    still applies even when `company`'s spelling doesn't resolve to
+    that vacancy's own company. One `read_vault` call, reusing
+    `resolve`'s and `list_vacancies`'s own private helpers rather than
+    calling either public function (which would each re-read the
+    vault) - see design.md decision 2."""
+    snapshot = read_vault(resolve_vault_path(vault))
+
+    matched_ids: dict[str, None] = {}
+
+    resolution = _resolve(company, snapshot)
+    if resolution.company_slug is not None:
+        for vacancy in snapshot.vacancies.values():
+            if vacancy.company_slug == resolution.company_slug:
+                matched_ids[vacancy.id] = None
+
+    for vacancy in snapshot.vacancies.values():
+        if vacancy.source_url == source_url:
+            matched_ids[vacancy.id] = None
+
+    return [_vacancy_summary(vacancy_id, snapshot) for vacancy_id in matched_ids]

@@ -43,7 +43,7 @@ _MODEL_NOT_LOADED_AT_BUILD_MSG = "embedding model should not load at server buil
 _MODEL_NOT_LOADED_FOR_KEYWORD_MSG = (
     "embedding model should not load for a keyword search"
 )
-_EXPECTED_TOOL_COUNT = 9
+_EXPECTED_TOOL_COUNT = 11
 
 
 def _init_vault(vault: Path) -> None:
@@ -729,10 +729,367 @@ def test_add_document_dedupes_by_external_id(tmp_path: Path) -> None:
     assert first.content[0].text == second.content[0].text
 
 
+# --- Section 14b (stage 9): create_vacancy tool -------------------------
+
+_CREATE_VACANCY_ARGS: dict[str, object] = {
+    "company": "Acme Corp",
+    "role": "Backend Engineer",
+    "source_url": "https://jobs.acme.example/1",
+    "found_date": "2026-08-10",
+    "status": "found",
+}
+
+
+def test_create_vacancy_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    vault = Path("/vault")
+    server = mcp_server.build_server(vault)
+    mock = Mock(
+        return_value=Path("/vault/acme-corp/2026-08-10-acme-corp-backend/vacancy.md")
+    )
+    monkeypatch.setattr(core, "create_vacancy", mock)
+
+    result = run(server.call_tool("create_vacancy", _CREATE_VACANCY_ARGS))
+
+    mock.assert_called_once_with(
+        "Acme Corp",
+        "Backend Engineer",
+        "https://jobs.acme.example/1",
+        date(2026, 8, 10),
+        Status.FOUND,
+        None,
+        None,
+        None,
+        None,
+        None,
+        vault=vault,
+    )
+    assert (
+        result.structured_content["path"]
+        == "/vault/acme-corp/2026-08-10-acme-corp-backend/vacancy.md"
+    )
+    assert result.structured_content["id"] == "2026-08-10-acme-corp-backend"
+
+
+def test_create_vacancy_schema_matches_core_param_names() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    tools = {t.name: t for t in run(server.list_tools())}
+    props = set(tools["create_vacancy"].input_schema["properties"])
+    assert props == {
+        "company",
+        "role",
+        "source_url",
+        "found_date",
+        "status",
+        "applied_date",
+        "stage_note",
+        "salary_note",
+        "recruiter",
+        "tags",
+    }
+
+
+def test_create_vacancy_status_enum_matches_status() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    tools = {t.name: t for t in run(server.list_tools())}
+    schema = tools["create_vacancy"].input_schema
+    enum = schema["$defs"]["Status"]["enum"]
+    assert enum == [s.value for s in Status]
+
+
+def test_create_vacancy_omitting_optional_fields_matches_core_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = Path("/vault")
+    server = mcp_server.build_server(vault)
+    mock = Mock(return_value=Path("/vault/acme-corp/v1/vacancy.md"))
+    monkeypatch.setattr(core, "create_vacancy", mock)
+
+    run(server.call_tool("create_vacancy", _CREATE_VACANCY_ARGS))
+
+    mock.assert_called_once_with(
+        "Acme Corp",
+        "Backend Engineer",
+        "https://jobs.acme.example/1",
+        date(2026, 8, 10),
+        Status.FOUND,
+        None,
+        None,
+        None,
+        None,
+        None,
+        vault=vault,
+    )
+
+
+def test_create_vacancy_new_company_creates_directory(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    server = mcp_server.build_server(vault)
+
+    run(server.call_tool("create_vacancy", _CREATE_VACANCY_ARGS))
+
+    assert (vault / "acme-corp" / "_company.md").is_file()
+
+
+def test_create_vacancy_existing_company_leaves_company_md_untouched(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    server = mcp_server.build_server(vault)
+    run(server.call_tool("create_vacancy", _CREATE_VACANCY_ARGS))
+    company_md = vault / "acme-corp" / "_company.md"
+    before = company_md.read_bytes()
+
+    second_args = dict(_CREATE_VACANCY_ARGS)
+    second_args["role"] = "Designer"
+    second_args["source_url"] = "https://jobs.acme.example/2"
+    run(server.call_tool("create_vacancy", second_args))
+
+    assert company_md.read_bytes() == before
+
+
+def test_create_vacancy_result_is_immediately_listed(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    server = mcp_server.build_server(vault)
+
+    run(server.call_tool("create_vacancy", _CREATE_VACANCY_ARGS))
+
+    result = run(server.call_tool("list_vacancies", {}))
+    companies = {row["company"] for row in result.structured_content["result"]}
+    assert "Acme Corp" in companies
+
+
+@pytest.mark.embedding
+def test_create_vacancy_result_is_immediately_searchable(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    build_index(read_vault(vault), default_index_path(vault))
+    server = mcp_server.build_server(vault)
+
+    run(server.call_tool("create_vacancy", _CREATE_VACANCY_ARGS))
+
+    result = run(
+        server.call_tool("search", {"query": "Backend Engineer", "mode": "keyword"})
+    )
+    companies = {hit["company"] for hit in result.structured_content["hits"]}
+    assert "Acme Corp" in companies
+
+
+def test_create_vacancy_same_day_company_unknown_role_gets_distinct_ids(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    server = mcp_server.build_server(vault)
+    args = dict(_CREATE_VACANCY_ARGS)
+    args["role"] = "unknown"
+
+    first = run(server.call_tool("create_vacancy", args))
+    second_args = dict(args)
+    second_args["source_url"] = "https://jobs.acme.example/2"
+    second = run(server.call_tool("create_vacancy", second_args))
+
+    assert first.structured_content["id"] != second.structured_content["id"]
+
+
+def test_create_vacancy_missing_applied_date_returns_typed_error(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    server = mcp_server.build_server(vault)
+    args = dict(_CREATE_VACANCY_ARGS)
+    args["status"] = "applied"
+
+    with pytest.raises(ToolError, match="InvalidVacancyDataError"):
+        run(server.call_tool("create_vacancy", args))
+
+    assert not (vault / "acme-corp").exists()
+
+
+def test_create_vacancy_applied_date_before_found_date_returns_typed_error(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    server = mcp_server.build_server(vault)
+    args = dict(_CREATE_VACANCY_ARGS)
+    args["status"] = "applied"
+    args["applied_date"] = "2026-08-01"  # earlier than found_date 2026-08-10
+
+    with pytest.raises(ToolError, match="InvalidVacancyDataError"):
+        run(server.call_tool("create_vacancy", args))
+
+    assert not (vault / "acme-corp").exists()
+
+
+def test_create_vacancy_description_states_unknown_role_convention() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    tools = {t.name: t for t in run(server.list_tools())}
+    description = tools["create_vacancy"].description.lower()
+    assert "unknown" in description
+    assert "needs_review" in description
+
+
+def test_create_vacancy_description_states_migrated_convention() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    tools = {t.name: t for t in run(server.list_tools())}
+    description = tools["create_vacancy"].description.lower()
+    assert "found_date" in description
+    assert "applied_date" in description
+    assert "migrated" in description
+
+
+def test_create_vacancy_description_states_check_before_create_convention() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    tools = {t.name: t for t in run(server.list_tools())}
+    description = tools["create_vacancy"].description.lower()
+    assert "does not deduplicate" in description
+    assert "find_existing" in description
+
+
+_BATCH_SIZE = 10
+_FAILING_BATCH_INDEX = 5
+
+
+def test_create_vacancy_ten_sequential_calls_produce_distinct_ids(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    server = mcp_server.build_server(vault)
+
+    ids = set()
+    for i in range(_BATCH_SIZE):
+        args = dict(_CREATE_VACANCY_ARGS)
+        args["source_url"] = f"https://jobs.acme.example/{i}"
+        result = run(server.call_tool("create_vacancy", args))
+        ids.add(result.structured_content["id"])
+
+    assert len(ids) == _BATCH_SIZE
+
+
+def test_create_vacancy_failure_mid_batch_leaves_prior_creations_intact(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    server = mcp_server.build_server(vault)
+
+    created_ids = []
+    for i in range(_BATCH_SIZE):
+        args = dict(_CREATE_VACANCY_ARGS)
+        args["source_url"] = f"https://jobs.acme.example/{i}"
+        if i == _FAILING_BATCH_INDEX:
+            args["status"] = "applied"  # invalid: no applied_date
+            with pytest.raises(ToolError, match="InvalidVacancyDataError"):
+                run(server.call_tool("create_vacancy", args))
+            continue
+        result = run(server.call_tool("create_vacancy", args))
+        created_ids.append(result.structured_content["id"])
+
+    assert len(created_ids) == _BATCH_SIZE - 1
+    snapshot = read_vault(vault)
+    assert set(created_ids) <= set(snapshot.vacancies)
+
+
+# --- Section 15 (stage 9): find_existing tool ----------------------------
+
+
+def test_find_existing_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    vault = Path("/vault")
+    server = mcp_server.build_server(vault)
+    summary = core.VacancySummary(
+        id="v1",
+        company="Acme",
+        role="Engineer",
+        status=Status.FOUND,
+        last_activity=date(2026, 1, 1),
+        document_count=0,
+    )
+    mock = Mock(return_value=[summary])
+    monkeypatch.setattr(core, "find_existing", mock)
+
+    result = run(
+        server.call_tool(
+            "find_existing",
+            {"company": "Acme", "source_url": "https://acme.example/1"},
+        )
+    )
+
+    mock.assert_called_once_with("Acme", "https://acme.example/1", vault=vault)
+    assert result.structured_content["result"] == [summary.model_dump(mode="json")]
+
+
+def test_find_existing_schema_matches_core_param_names() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    tools = {t.name: t for t in run(server.list_tools())}
+    props = set(tools["find_existing"].input_schema["properties"])
+    assert props == {"company", "source_url"}
+
+
+def test_find_existing_tool_returns_matches_for_existing_company(
+    tmp_path: Path,
+) -> None:
+    vault = _demo_vault(tmp_path / "vault")
+    server = mcp_server.build_server(vault)
+
+    result = run(
+        server.call_tool(
+            "find_existing",
+            {"company": "Acme Corp", "source_url": "https://nowhere.example/1"},
+        )
+    )
+
+    companies = {row["company"] for row in result.structured_content["result"]}
+    assert companies == {"Acme Corp"}
+
+
+def test_find_existing_tool_returns_empty_for_unknown_company_and_url(
+    tmp_path: Path,
+) -> None:
+    vault = _demo_vault(tmp_path / "vault")
+    server = mcp_server.build_server(vault)
+
+    result = run(
+        server.call_tool(
+            "find_existing",
+            {
+                "company": "No Such Company",
+                "source_url": "https://nowhere.example/1",
+            },
+        )
+    )
+
+    assert result.structured_content["result"] == []
+
+
+def test_find_existing_tool_matches_source_url_across_company_spellings(
+    tmp_path: Path,
+) -> None:
+    vault = _demo_vault(tmp_path / "vault")
+    server = mcp_server.build_server(vault)
+
+    result = run(
+        server.call_tool(
+            "find_existing",
+            {
+                "company": "Acme Corporation Ltd",
+                "source_url": "https://jobs.acme.example/v1",
+            },
+        )
+    )
+
+    ids = {row["id"] for row in result.structured_content["result"]}
+    assert "v1" in ids
+
+
 # --- Section 20: annotations / tool-list membership -------------------
 
 
-def test_tool_list_is_exactly_the_nine_specified_tools() -> None:
+def test_tool_list_is_exactly_the_eleven_specified_tools() -> None:
     server = mcp_server.build_server(Path("/vault"))
     names = {t.name for t in run(server.list_tools())}
     assert names == {
@@ -742,12 +1099,13 @@ def test_tool_list_is_exactly_the_nine_specified_tools() -> None:
         "search",
         "read_document",
         "resolve",
+        "find_existing",
         "append_note",
         "set_status",
         "add_document",
+        "create_vacancy",
     }
     assert "reindex" not in names
-    assert "create_vacancy" not in names
 
 
 def test_every_tool_has_open_world_hint_false() -> None:
@@ -765,6 +1123,7 @@ def test_read_tools_have_read_only_hint_true() -> None:
         "search",
         "read_document",
         "resolve",
+        "find_existing",
     }
     for tool in run(server.list_tools()):
         if tool.name in read_tools:
@@ -773,7 +1132,7 @@ def test_read_tools_have_read_only_hint_true() -> None:
 
 def test_write_tools_have_read_only_and_destructive_hint_false() -> None:
     server = mcp_server.build_server(Path("/vault"))
-    write_tools = {"append_note", "set_status", "add_document"}
+    write_tools = {"append_note", "set_status", "add_document", "create_vacancy"}
     for tool in run(server.list_tools()):
         if tool.name in write_tools:
             assert tool.annotations.read_only_hint is False

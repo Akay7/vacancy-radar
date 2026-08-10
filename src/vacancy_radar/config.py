@@ -39,6 +39,29 @@ class VaultNotFoundError(Exception):
         super().__init__(f"{path} is not a valid vault: {reason}")
 
 
+def _resolve_candidate_path(explicit: Path | str | None) -> Path:
+    """The explicit-then-`VAULT_PATH` precedence shared by
+    `resolve_vault_path` and `resolve_target_path` - resolution only,
+    no existence/directory/marker check. Raises `VaultNotConfiguredError`
+    when neither `explicit` nor `VAULT_PATH` is given; that's the one
+    error both callers still need identically (see vault-init change's
+    design.md decision 2)."""
+    candidate = explicit if explicit is not None else os.environ.get("VAULT_PATH")
+    if candidate is None:
+        raise VaultNotConfiguredError
+    return Path(candidate).resolve()
+
+
+def resolve_target_path(explicit: Path | str | None = None) -> Path:
+    """Resolve a target path for an operation that may create a vault
+    (`core.init_vault`) rather than assume one already exists: same
+    explicit-then-`VAULT_PATH` precedence as `resolve_vault_path`, but
+    the returned path is not required to exist, be a directory, or
+    carry a `.vacancy-radar/` marker - it may be exactly the path
+    `init_vault` is about to create."""
+    return _resolve_candidate_path(explicit)
+
+
 def resolve_vault_path(explicit: Path | str | None = None) -> Path:
     """Resolve the vault path to use.
 
@@ -47,11 +70,7 @@ def resolve_vault_path(explicit: Path | str | None = None) -> Path:
     directory, and contain a `.vacancy-radar/` marker directory before
     being returned.
     """
-    candidate = explicit if explicit is not None else os.environ.get("VAULT_PATH")
-    if candidate is None:
-        raise VaultNotConfiguredError
-
-    path = Path(candidate).resolve()
+    path = _resolve_candidate_path(explicit)
 
     if not path.exists():
         raise VaultNotFoundError(path, reason="path does not exist")

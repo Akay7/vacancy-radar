@@ -661,6 +661,34 @@ def add_command(  # noqa: PLR0913 - each option mirrors add_document's own signa
     _render_write_outcome(path, outcome=outcome, as_json=as_json)
 
 
+# --- init ----------------------------------------------------------------
+
+
+@app.command("init")
+def init_command(
+    path: Annotated[
+        str | None,
+        typer.Argument(
+            help="Where to create the vault. Defaults to VAULT_PATH when omitted."
+        ),
+    ] = None,
+    *,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit JSON instead of plain output.")
+    ] = False,
+) -> None:
+    """Create a vault at PATH (or VAULT_PATH). Idempotent - running this
+    again against an already-initialized vault changes nothing and
+    still exits 0."""
+    try:
+        result = core.init_vault(path)
+    except _CORE_ERRORS as exc:
+        _fail(exc)
+
+    outcome = "created" if result.created else "already initialized"
+    _render_write_outcome(result.path, outcome=outcome, as_json=as_json)
+
+
 # --- new ---------------------------------------------------------------
 
 
