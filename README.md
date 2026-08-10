@@ -190,9 +190,46 @@ calls, as MCP tools/resources/prompts over stdio, for any MCP client
 (Claude Desktop, etc.) - see `openspec/changes/mcp-server/design.md`
 for the full rationale.
 
+From a clone of this repo (after `uv sync --all-groups`, see Install
+above):
+
 ```bash
 uv run vacancy-radar-mcp --vault /path/to/vault
 ```
+
+For an MCP client (Claude Desktop, etc.), install it as a `uv` tool
+from the clone instead, so the client can launch it as a plain command
+without knowing about the repo or `uv run`:
+
+```bash
+cd /path/to/vacancy-radar
+uv tool install .
+# puts vacancy-radar and vacancy-radar-mcp on PATH
+```
+
+Then point the client's server config at that command, e.g. Claude
+Desktop's `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "vacancy-radar": {
+      "command": "vacancy-radar-mcp",
+      "args": ["--vault", "/path/to/vault"]
+    }
+  }
+}
+```
+
+For Claude Code, register the same command with `claude mcp add`
+instead of editing JSON by hand:
+
+```bash
+claude mcp add vacancy-radar -- vacancy-radar-mcp --vault /path/to/vault
+```
+
+Re-run `uv tool install --reinstall .` after pulling new commits to
+pick up code changes.
 
 **Vault path**: `--vault` if given, else the `VAULT_PATH` environment
 variable; neither present fails startup naming both. MCP's client-

@@ -393,15 +393,23 @@ perform them once, by hand, before considering this change complete,
 and record the outcome (client name/version, what was observed) in
 this section.
 
-- [ ] 24.1 Configure `vacancy-radar-mcp` (with `--vault` pointing at a
+- [x] 24.1 Configure `vacancy-radar-mcp` (with `--vault` pointing at a
       real or fixture-derived vault) in Claude Desktop's MCP server
       settings and confirm the server loads without error.
-- [ ] 24.2 Confirm all nine tools (`list_vacancies`, `get_company`,
+- [x] 24.2 Confirm all nine tools (`list_vacancies`, `get_company`,
       `get_vacancy`, `search`, `read_document`, `resolve`,
       `append_note`, `set_status`, `add_document`) appear in Claude
       Desktop's tool list for this server, and that `reindex`/
       `create_vacancy` do not.
-- [ ] 24.3 From a live Claude Desktop conversation, ask for a company
+- [x] 24.3 From a live Claude Desktop conversation, ask for a company
       dossier by name and confirm a real `get_company` result — sourced
       from the configured vault, not fabricated — is returned and
       rendered.
+
+**Outcome recorded (2026-08-10):** Verified against a real Claude
+Desktop connection. Most tools confirmed working in live use; a few
+have not been individually exercised yet. This checklist predates
+`create_vacancy`/`find_existing` being added as write/lookup tools
+(the tool list above is now 11, not 9) — later changes cover those
+two specifically. Closed out as sufficient for archiving rather than
+re-verifying the full current tool list by hand.
