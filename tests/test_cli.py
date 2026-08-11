@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import sys
 from datetime import date
@@ -23,6 +24,27 @@ FIXTURE_VAULT = Path(__file__).resolve().parent / "fixtures" / "vault"
 _ENV_WIDE = {"COLUMNS": "400", "LINES": "50"}
 """Widens Rich's rendering width for table-output assertions, so a long
 vacancy id or company name never gets column-wrapped mid-string."""
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain(output: str) -> str:
+    """Strip ANSI styling so substring assertions see the literal text.
+
+    Whether Rich colors its output depends on the environment, not on us -
+    it stays off under a plain `pytest` run but switches on under
+    `FORCE_COLOR` or a terminal-backed runner. Colored, Rich's option
+    highlighter renders `--source-url` as three separately styled spans,
+    so the substring is simply absent. `NO_COLOR` is not a fix: it drops
+    the color but keeps the bold spans, and the text stays fragmented.
+
+    Negative assertions are the reason this matters. `"--status" not in
+    output` passes unconditionally against fragmented text, so an
+    unstripped assertion would keep passing even if the option it forbids
+    came back.
+    """
+    return _ANSI_ESCAPE.sub("", output)
+
 
 _FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 if str(_FIXTURES_DIR) not in sys.path:
@@ -849,8 +871,9 @@ def test_init_on_new_path_reports_created(tmp_path: Path) -> None:
     result = runner.invoke(app, ["init", str(target)])
 
     assert result.exit_code == 0
-    assert "created" in result.output
-    assert str(target) in result.output
+    output = plain(result.output)
+    assert "created" in output
+    assert str(target) in output
     assert (target / VAULT_MARKER_DIRNAME).is_dir()
 
 
@@ -1091,8 +1114,9 @@ def test_reindex_command_against_fresh_index_reports_zero_changes(
     result = runner.invoke(app, ["reindex"], env={"VAULT_PATH": str(vault)})
 
     assert result.exit_code == 0
-    assert "added=0" in result.output
-    assert "changed=0" in result.output
+    output = plain(result.output)
+    assert "added=0" in output
+    assert "changed=0" in output
 
 
 def test_reindex_command_force_reports_every_row_reembedded(tmp_path: Path) -> None:
@@ -1102,7 +1126,7 @@ def test_reindex_command_force_reports_every_row_reembedded(tmp_path: Path) -> N
     result = runner.invoke(app, ["reindex", "--force"], env={"VAULT_PATH": str(vault)})
 
     assert result.exit_code == 0
-    assert "unchanged=0" in result.output
+    assert "unchanged=0" in plain(result.output)
 
 
 def test_reindex_command_json_matches_index_report_fields(tmp_path: Path) -> None:
@@ -1357,11 +1381,12 @@ def test_edit_help_exposes_no_status_company_or_id_option() -> None:
     result = runner.invoke(app, ["edit", "--help"], env=_ENV_WIDE)
 
     assert result.exit_code == 0
-    assert "--status" not in result.output
-    assert "--company" not in result.output
-    assert "--id" not in result.output
+    output = plain(result.output)
+    assert "--status" not in output
+    assert "--company" not in output
+    assert "--id" not in output
     for option in ("--source-url", "--role", "--tags", "--clear"):
-        assert option in result.output
+        assert option in output
 
 
 def test_edit_clear_removes_a_nullable_field(tmp_path: Path) -> None:
@@ -1429,7 +1454,7 @@ def test_edit_malformed_date_option_exits_nonzero(tmp_path: Path) -> None:
     )
 
     assert result.exit_code != 0
-    assert "--found-date" in result.output
+    assert "--found-date" in plain(result.output)
     assert vacancy_path.read_bytes() == before
 
 
