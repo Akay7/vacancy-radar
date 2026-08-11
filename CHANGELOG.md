@@ -4,7 +4,10 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/), and this
 project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-08-11
+
+Vacancies became editable: their fields, not just their status, with
+every edit recorded in the vault.
 
 ### Added
 
@@ -20,6 +23,13 @@ project uses [Semantic Versioning](https://semver.org/).
   overwritten frontmatter value still leaves an append-only record in
   the vault. A call that would change nothing writes nothing.
 
+### Changed
+
+- Status- and edit-history entries are now appended inside their own
+  section rather than at the end of the body, so the two blocks can
+  coexist in any order. Output for a file whose last section is
+  `## Status History` is unchanged.
+
 ### Fixed
 
 - **A company name now works as a write command's vacancy argument.**
@@ -30,13 +40,6 @@ project uses [Semantic Versioning](https://semver.org/).
   `core.resolve_vacancy`; one holding several still refuses, naming
   every candidate id. `core.resolve` itself is unchanged, so `show` and
   the read tools still answer a company query with a company.
-
-### Changed
-
-- Status- and edit-history entries are now appended inside their own
-  section rather than at the end of the body, so the two blocks can
-  coexist in any order. Output for a file whose last section is
-  `## Status History` is unchanged.
 
 ## [0.1.0] - 2026-08-10
 
@@ -97,4 +100,5 @@ markdown vault, with hybrid search and an MCP server.
 - CI on pushes to `main` and pull requests: pre-commit hooks and the
   full test suite, with the embedding model cached by model name.
 
+[0.2.0]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.1.0

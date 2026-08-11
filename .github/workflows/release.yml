@@ -65,7 +65,7 @@ jobs:
           echo "tag $GITHUB_REF_NAME agrees with built version $built_version"
 
       - name: Upload dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -85,7 +85,7 @@ jobs:
           python-version: "3.12"
 
       - name: Download dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist
@@ -135,7 +135,7 @@ jobs:
       # The same artifact the verify job installed and ran - not a
       # rebuild, so what was tested is byte-identical to what ships.
       - name: Download dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist

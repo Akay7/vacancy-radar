@@ -28,7 +28,7 @@ jobs:
         run: uv sync --all-groups
 
       - name: Cache embedding models
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/huggingface
           # Keyed by the fastembed model name(s) this project uses, so a
@@ -51,7 +51,7 @@ jobs:
       # how many have finished.
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.12'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.xml
