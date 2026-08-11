@@ -133,11 +133,30 @@ claude mcp add vacancy-radar -- \
 
 On Windows, drop the `\` line continuation and put it on one line.
 
-Both assume `uv tool install` from step 1 put `vacancy-radar-mcp` on
-PATH. If you would rather not install it persistently, use `uvx` as the
-command instead — but note it needs `--from`, because `uvx` resolves a
-*distribution* named after the command it is given, and the script here
-is `vacancy-radar-mcp` while the distribution is `vacancy-radar`:
+For [opencode](https://opencode.ai/), add an entry under `mcp` in
+`opencode.json` — `~/.config/opencode/opencode.json` (or `.jsonc`) to make it
+available in every project, or an `opencode.json` at a project root to
+scope it to that project only:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "vacancy-radar": {
+      "type": "local",
+      "command": ["vacancy-radar-mcp", "--vault", "/absolute/path/to/job-search"],
+      "enabled": true
+    }
+  }
+}
+```
+
+All three assume `uv tool install` from step 1 put `vacancy-radar-mcp`
+on PATH. If you would rather not install it persistently, use `uvx` as
+the command instead — but note it needs `--from`, because `uvx`
+resolves a *distribution* named after the command it is given, and the
+script here is `vacancy-radar-mcp` while the distribution is
+`vacancy-radar`:
 
 ```json
 {
@@ -152,6 +171,12 @@ is `vacancy-radar-mcp` while the distribution is `vacancy-radar`:
     }
   }
 }
+```
+
+For opencode, that's the `command` array instead:
+
+```json
+"command": ["uvx", "--from", "vacancy-radar", "vacancy-radar-mcp", "--vault", "/absolute/path/to/job-search"]
 ```
 
 A bare `uvx vacancy-radar-mcp` looks for a distribution that does not
