@@ -107,6 +107,11 @@ ignore = [
 # also reports on tests/ and site-packages.
 [tool.coverage.run]
 source = ["src/vacancy_radar"]
+# Configured here rather than as `--cov-branch` on the CI command line so
+# a local `pytest --cov` measures the same thing CI does. Counts each
+# outgoing edge of a conditional, not just whether the line ran - an
+# untaken `if` -> skip edge is a partial, which line coverage calls done.
+branch = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
