@@ -24,6 +24,8 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Office/Business",
     "Topic :: Text Processing :: Indexing",
 ]
@@ -100,6 +102,11 @@ ignore = [
 "tests/fixtures/generate.py" = ["S311"]  # seeded PRNG for deterministic fixtures, not crypto
 "tests/fixtures/pdfs.py" = ["S106", "S107"]  # test-fixture PDF passwords, not real secrets
 "tests/fixtures/test_pdfs.py" = ["S106"]  # test-fixture PDF password, not a real secret
+
+# Bare `--cov` in CI measures whatever this names; without it, coverage
+# also reports on tests/ and site-packages.
+[tool.coverage.run]
+source = ["src/vacancy_radar"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

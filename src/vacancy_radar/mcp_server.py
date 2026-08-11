@@ -155,7 +155,8 @@ def build_server(vault_path: Path) -> MCPServer:
         instructions=(
             "Tools for a local-first job application vault: read vacancies, "
             "companies, and documents; search the vault; append notes, "
-            "change status, file documents, and create new vacancies "
+            "change status, correct a vacancy's stored fields, file "
+            "documents, and create new vacancies "
             "(e.g. when importing an existing tracker conversationally - "
             "see create_vacancy's own description). Reindexing is "
             "intentionally not exposed here - use `vacancy-radar reindex` "
@@ -327,6 +328,51 @@ def _register_write_tools(server: MCPServer, vault_path: Path) -> None:
             force=force,
             vault=vault_path,
         )
+
+    @server.tool(annotations=_WRITE)
+    @_delegate
+    async def edit_vacancy(  # noqa: PLR0913, PLR0917 - mirrors core.edit_vacancy's own signature
+        vacancy_id: str,
+        source_url: str | None = None,
+        role: str | None = None,
+        stage_note: str | None = None,
+        salary_note: str | None = None,
+        recruiter: str | None = None,
+        external_id: str | None = None,
+        tags: list[str] | None = None,
+        found_date: date | None = None,
+        applied_date: date | None = None,
+        clear: list[str] | None = None,
+    ) -> core.EditResult:
+        """Correct a vacancy's stored fields - a moved posting URL, a
+        role that was "unknown" when it was captured, a mistyped date.
+
+        Omitting a parameter leaves that field alone; there is no way to
+        set a field to null by passing null. To remove a field, name it
+        in clear (e.g. clear=["recruiter"]) - only source_url,
+        stage_note, salary_note, recruiter, external_id, and
+        applied_date can be cleared. tags replaces the whole list, so
+        pass the tags you want to keep alongside any you are adding.
+
+        Status is not editable here - use set_status, which validates
+        the transition. A vacancy's company and id cannot be changed at
+        all. Every applied change is recorded in the vacancy's edit
+        history; a call that would change nothing writes nothing."""
+        edits = core.resolve_field_edits(
+            {
+                "source_url": source_url,
+                "role": role,
+                "stage_note": stage_note,
+                "salary_note": salary_note,
+                "recruiter": recruiter,
+                "external_id": external_id,
+                "tags": tags,
+                "found_date": found_date,
+                "applied_date": applied_date,
+            },
+            clear,
+        )
+        return core.edit_vacancy(vacancy_id, vault=vault_path, **edits)
 
     @server.tool(annotations=_WRITE)
     @_delegate

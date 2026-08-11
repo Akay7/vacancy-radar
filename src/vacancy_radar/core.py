@@ -24,7 +24,7 @@ atomic-write strategy every write in this module goes through.
 import difflib
 import os
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -90,6 +90,25 @@ class AmbiguousEntityError(CoreError):
         self.candidates = candidates
         names = ", ".join(f"{c.name} ({c.slug})" for c in candidates)
         super().__init__(f"{query!r} matches more than one company: {names}")
+
+
+class AmbiguousVacancyError(CoreError):
+    """Raised when a query resolves to a company holding more than one
+    vacancy, so there is no single vacancy to write to - the vacancy-
+    level counterpart to `AmbiguousEntityError` (resolve-write-target-
+    vacancy's design.md decision 3). Never picks one."""
+
+    def __init__(
+        self, query: str, company_slug: str, vacancy_ids: tuple[str, ...]
+    ) -> None:
+        self.query = query
+        self.company_slug = company_slug
+        self.vacancy_ids = vacancy_ids
+        ids = ", ".join(vacancy_ids)
+        super().__init__(
+            f"{query!r} matches company {company_slug!r}, which has "
+            f"{len(vacancy_ids)} vacancies: {ids}"
+        )
 
 
 class WrongEntityKindError(CoreError):
@@ -296,6 +315,45 @@ def _resolve_vacancy_id(query: str, snapshot: VaultSnapshot) -> str:
     if resolution.candidates:
         raise AmbiguousEntityError(query, resolution.candidates)
     raise EntityNotFoundError(query)
+
+
+def resolve_vacancy(query: str, vault: Path | None = None) -> str:
+    """Resolve `query` to exactly one vacancy id, for the write commands
+    (resolve-write-target-vacancy's design.md).
+
+    Runs `resolve`'s own tiers - exact vacancy id, exact company slug,
+    exact company name, unambiguous fuzzy company name - and then
+    narrows a company-tier match to that company's single vacancy
+    (decision 2). Never guesses: a company holding several vacancies
+    raises `AmbiguousVacancyError` naming every candidate id, a company
+    holding none raises `EntityNotFoundError`, and an ambiguous company
+    query raises `AmbiguousEntityError` before narrowing is reached.
+
+    `resolve` itself is unchanged and still answers a company query with
+    a company - which is what `show`, `get_company`, and `find_existing`
+    need (decision 5). This is the narrower question the write half
+    asks, not a replacement for it.
+    """
+    snapshot = read_vault(resolve_vault_path(vault))
+    resolution = _resolve(query, snapshot)
+
+    if resolution.vacancy_id is not None:
+        return resolution.vacancy_id
+    if resolution.candidates:
+        raise AmbiguousEntityError(query, resolution.candidates)
+    if resolution.company_slug is None:
+        raise EntityNotFoundError(query)
+
+    vacancy_ids = tuple(
+        vacancy_id
+        for vacancy_id, vacancy in snapshot.vacancies.items()
+        if vacancy.company_slug == resolution.company_slug
+    )
+    if not vacancy_ids:
+        raise EntityNotFoundError(query)
+    if len(vacancy_ids) > 1:
+        raise AmbiguousVacancyError(query, resolution.company_slug, vacancy_ids)
+    return vacancy_ids[0]
 
 
 # --- Listing -------------------------------------------------------------
@@ -992,9 +1050,61 @@ class StatusChange:
 
 
 STATUS_HISTORY_HEADING = "## Status History"
-"""The status-history block's heading. Always the final section of
-`vacancy.md`'s body (design.md decision 6) - `set_status` only ever
-appends after it, never parses markdown section boundaries."""
+"""The status-history block's heading (design.md decision 6)."""
+
+EDIT_HISTORY_HEADING = "## Edit History"
+"""The edit-history block's heading - `edit_vacancy`'s counterpart to
+`STATUS_HISTORY_HEADING` (edit-vacancy-fields' design.md decision 5).
+The two blocks are independent: each append lands inside its own
+section, whichever order they appear in."""
+
+_SECTION_BOUNDARY_PREFIX = "## "
+
+
+def _append_to_section(body: str, heading: str, entries: Iterable[str]) -> str:
+    """Append `entries` as the last lines of `heading`'s own section.
+
+    A section runs from its heading to the next `##` heading or the end
+    of the body, so an append lands inside the right block even when
+    another one follows it (edit-vacancy-fields' design.md decision 6) -
+    what the previous end-of-body append could not guarantee once
+    `vacancy.md` could carry two history blocks. When `heading` is
+    absent, the section is created at the end of the body; when it is
+    the body's last section, the output is byte-identical to that
+    earlier append.
+    """
+    new_lines = list(entries)
+    if not new_lines:
+        return body
+
+    lines = body.split("\n")
+    heading_index = next(
+        (index for index, line in enumerate(lines) if line.strip() == heading), None
+    )
+    if heading_index is None:
+        stripped = body.rstrip("\n")
+        prefix = f"{stripped}\n\n" if stripped else ""
+        return prefix + heading + "\n" + "".join(f"{line}\n" for line in new_lines)
+
+    end = len(lines)
+    for index in range(heading_index + 1, len(lines)):
+        if lines[index].startswith(_SECTION_BOUNDARY_PREFIX):
+            end = index
+            break
+
+    # Trailing blank lines belong to the gap before the next section (or
+    # to the end of the file), not to this section's entries.
+    insert_at = end
+    while insert_at > heading_index + 1 and not lines[insert_at - 1].strip():
+        insert_at -= 1
+
+    appended_at_end = insert_at == len(lines)
+    result = "\n".join(lines[:insert_at] + new_lines + lines[insert_at:])
+    if appended_at_end and not result.endswith("\n"):
+        # Matches the trailing newline the prior end-of-body append
+        # always left behind.
+        result += "\n"
+    return result
 
 
 def _resolve_applied_date(
@@ -1021,13 +1131,7 @@ def _append_status_history(
     entry = f"- {today.isoformat()}: {old_status.value} -> {new_status.value}"
     if note:
         entry += f" ({note})"
-
-    if STATUS_HISTORY_HEADING in body:
-        return f"{body.rstrip(chr(10))}\n{entry}\n"
-
-    stripped = body.rstrip("\n")
-    prefix = f"{stripped}\n\n" if stripped else ""
-    return f"{prefix}{STATUS_HISTORY_HEADING}\n{entry}\n"
+    return _append_to_section(body, STATUS_HISTORY_HEADING, [entry])
 
 
 def set_status(  # noqa: PLR0913 - the deliverable's public signature; each is meaningful
@@ -1111,6 +1215,307 @@ def set_status(  # noqa: PLR0913 - the deliverable's public signature; each is m
         changed=True,
         applied_date=effective_applied_date,
     )
+
+
+# --- Writing: edit_vacancy() --------------------------------------------
+
+
+class _UnsetType:
+    """The type of `UNSET` - a distinct singleton, never a value a
+    caller could mean."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET = _UnsetType()
+"""Every `edit_vacancy` field parameter's default: "leave this field
+alone". `None` cannot serve that purpose - most editable fields are
+nullable, so `None` is a real value meaning "clear it" (edit-vacancy-
+fields' design.md decision 2)."""
+
+type Unsettable[T] = T | _UnsetType
+
+EDITABLE_FIELDS: tuple[str, ...] = (
+    "source_url",
+    "role",
+    "stage_note",
+    "salary_note",
+    "recruiter",
+    "external_id",
+    "tags",
+    "found_date",
+    "applied_date",
+)
+"""Exactly the fields `edit_vacancy` accepts. `id`, `status`,
+`company`, and `company_slug` are absent by design (edit-vacancy-fields'
+design.md decision 3): the id is immutable and names the vacancy's
+directory, `status` belongs to `set_status` and its transition graph,
+and the company pair determines where the vacancy directory lives."""
+
+NULLABLE_EDITABLE_FIELDS: frozenset[str] = frozenset(
+    {"source_url", "stage_note", "salary_note", "recruiter", "external_id",
+     "applied_date"}
+)  # fmt: skip
+"""The editable fields that can be cleared. `role` and `found_date` are
+mandatory on `Vacancy`; `tags` is emptied by setting `[]`, not cleared."""
+
+
+class UneditableFieldError(CoreError):
+    """Raised when a caller names a field that `edit_vacancy` does not
+    accept - only reachable from the CLI and MCP surfaces, which pass
+    field names as strings (design.md decision 9)."""
+
+    def __init__(self, field: str) -> None:
+        self.field = field
+        editable = ", ".join(EDITABLE_FIELDS)
+        super().__init__(f"{field!r} is not an editable field; editable: {editable}")
+
+
+class NotNullableFieldError(CoreError):
+    """Raised when a caller asks to clear a field that must always have
+    a value."""
+
+    def __init__(self, field: str) -> None:
+        self.field = field
+        nullable = ", ".join(sorted(NULLABLE_EDITABLE_FIELDS))
+        super().__init__(f"{field!r} cannot be cleared; clearable fields: {nullable}")
+
+
+class ConflictingEditError(CoreError):
+    """Raised when one field is both given a value and named for
+    clearing in the same call."""
+
+    def __init__(self, field: str) -> None:
+        self.field = field
+        super().__init__(f"{field!r} cannot be both set and cleared in one edit")
+
+
+@dataclass(frozen=True)
+class FieldChange:
+    """One field an `edit_vacancy` call actually changed, with the
+    parsed values on either side of it."""
+
+    field: str
+    old: object
+    new: object
+
+
+@dataclass(frozen=True)
+class EditResult:
+    """The outcome of one `edit_vacancy` call. `changed=False` marks the
+    no-op - `changes` is empty in that case, and nothing in the vault
+    was written."""
+
+    vacancy_id: str
+    changed: bool
+    changes: tuple[FieldChange, ...] = ()
+
+    @property
+    def changed_fields(self) -> tuple[str, ...]:
+        return tuple(change.field for change in self.changes)
+
+
+def resolve_field_edits(
+    values: Mapping[str, object | None], clear: Iterable[str] | None = None
+) -> dict[str, object | None]:
+    """Map a string-keyed set of field values and clear requests onto
+    `edit_vacancy` keyword arguments, for the CLI and MCP surfaces,
+    which cannot pass `UNSET` (design.md decision 9).
+
+    In `values`, `None` means "not given" - those keys are dropped; a
+    field is cleared by naming it in `clear` instead, which maps it to
+    `None` in the result. Field names accept hyphens (`salary-note`),
+    the form a CLI option carries. Raises `UneditableFieldError`,
+    `NotNullableFieldError`, and `ConflictingEditError` - the only
+    runtime field-name checks in the design.
+    """
+    resolved: dict[str, object | None] = {}
+    for name, value in values.items():
+        if value is None:
+            continue
+        field = _normalize_field_name(name)
+        resolved[field] = value
+
+    for name in clear or ():
+        field = _normalize_field_name(name)
+        if field not in NULLABLE_EDITABLE_FIELDS:
+            raise NotNullableFieldError(field)
+        if field in resolved:
+            raise ConflictingEditError(field)
+        resolved[field] = None
+
+    return resolved
+
+
+def _normalize_field_name(name: str) -> str:
+    field = name.strip().lower().replace("-", "_")
+    if field not in EDITABLE_FIELDS:
+        raise UneditableFieldError(field)
+    return field
+
+
+_MAX_HISTORY_VALUE_LENGTH = 120
+"""How much of a value an edit-history entry carries before it is
+truncated - the entry is a pointer to what changed, not a backup of the
+value (design.md's risks)."""
+
+
+def render_history_value(value: object) -> str:
+    """Render one side of an edit-history entry as a single line - also
+    what the CLI prints for a changed field, so the two agree.
+
+    Multi-line values are collapsed to their first line plus a count,
+    so no value - a `stage_note` pasted from an email, say - can
+    introduce what reads as an additional history entry.
+    """
+    if value is None or value == []:
+        return "(none)"
+    if isinstance(value, date):
+        text = value.isoformat()
+    elif isinstance(value, list | tuple):
+        text = ", ".join(str(item) for item in value)
+    else:
+        text = str(value)
+
+    lines = text.splitlines() or [""]
+    head = lines[0]
+    if len(head) > _MAX_HISTORY_VALUE_LENGTH:
+        head = head[: _MAX_HISTORY_VALUE_LENGTH - 3].rstrip() + "..."
+    if len(lines) > 1:
+        head += f" [+{len(lines) - 1} more lines]"
+    return head or "(empty)"
+
+
+def _append_edit_history(body: str, changes: Iterable[FieldChange]) -> str:
+    today = datetime.now().astimezone().date()
+    entries = [
+        f"- {today.isoformat()}: {change.field}: "
+        f"{render_history_value(change.old)} -> {render_history_value(change.new)}"
+        for change in changes
+    ]
+    return _append_to_section(body, EDIT_HISTORY_HEADING, entries)
+
+
+def _apply_field_to_metadata(
+    metadata: dict[str, object], field: str, value: object
+) -> None:
+    """Set or remove one frontmatter key, writing dates in the ISO form
+    every other writer in this module uses."""
+    if value is None:
+        metadata.pop(field, None)
+    elif isinstance(value, date):
+        metadata[field] = value.isoformat()
+    elif isinstance(value, list | tuple):
+        metadata[field] = list(value)
+    else:
+        metadata[field] = value
+
+
+def edit_vacancy(  # noqa: PLR0913 - the deliverable's public signature; one parameter per editable field
+    vacancy_id: str,
+    *,
+    source_url: Unsettable[str | None] = UNSET,
+    role: Unsettable[str] = UNSET,
+    stage_note: Unsettable[str | None] = UNSET,
+    salary_note: Unsettable[str | None] = UNSET,
+    recruiter: Unsettable[str | None] = UNSET,
+    external_id: Unsettable[str | None] = UNSET,
+    tags: Unsettable[list[str]] = UNSET,
+    found_date: Unsettable[date] = UNSET,
+    applied_date: Unsettable[date | None] = UNSET,
+    vault: Path | None = None,
+) -> EditResult:
+    """Set one or more of a vacancy's editable frontmatter fields in a
+    single validated, atomic write (edit-vacancy-fields' design.md).
+
+    Every field parameter defaults to `UNSET` ("leave it alone"); a
+    nullable field passed as `None` is cleared. `status`, `id`,
+    `company`, and `company_slug` are not parameters - the signature is
+    what makes them uneditable, so passing one is a `TypeError` at the
+    call site rather than a runtime rejection (decision 1).
+
+    The merged frontmatter is validated by constructing a whole
+    `Vacancy` before anything is written, so cross-field rules apply
+    even to fields the caller did not give (decision 4) - clearing
+    `applied_date` on a vacancy that has moved off `found` raises
+    `InvalidVacancyDataError`, and the file is left untouched. A call
+    that changes nothing writes nothing, appends no history, and does
+    not reindex (decision 7). Every applied change appends an entry to
+    the `## Edit History` block; every other line of `vacancy.md`,
+    including the body's `# {role}` heading, is preserved byte-for-byte
+    (decisions 5 and 8). The vacancy's id and directory never change,
+    even when `found_date` or `role` - which contributed to that id
+    when it was minted - are edited (decision 3).
+    """
+    vault_root = resolve_vault_path(vault)
+    snapshot = read_vault(vault_root)
+
+    if vacancy_id not in snapshot.vacancies:
+        raise EntityNotFoundError(vacancy_id)
+    vacancy = snapshot.vacancies[vacancy_id]
+
+    given: dict[str, object] = {
+        field: value
+        for field, value in (
+            ("source_url", source_url),
+            ("role", role),
+            ("stage_note", stage_note),
+            ("salary_note", salary_note),
+            ("recruiter", recruiter),
+            ("external_id", external_id),
+            ("tags", tags),
+            ("found_date", found_date),
+            ("applied_date", applied_date),
+        )
+        if not isinstance(value, _UnsetType)
+    }
+    if not given:
+        return EditResult(vacancy_id=vacancy_id, changed=False)
+
+    vacancy_path = snapshot.vacancy_paths[vacancy_id]
+    _ensure_within_vault(vault_root, vacancy_path)
+    original_text = vacancy_path.read_text(encoding="utf-8")
+    metadata, body = frontmatter.parse(original_text, filename=str(vacancy_path))
+
+    for field, value in given.items():
+        _apply_field_to_metadata(metadata, field, value)
+
+    try:
+        updated = Vacancy(**metadata)
+    except ValidationError as exc:
+        raise InvalidVacancyDataError(vacancy_id, exc) from exc
+
+    # Compared on the parsed models, not on raw YAML, so an edit that
+    # restates a stored value - `tags=[]` against an absent `tags`, an
+    # unchanged date written differently - is the no-op it looks like.
+    changes = tuple(
+        FieldChange(
+            field=field, old=getattr(vacancy, field), new=getattr(updated, field)
+        )
+        for field in given
+        if getattr(vacancy, field) != getattr(updated, field)
+    )
+    if not changes:
+        return EditResult(vacancy_id=vacancy_id, changed=False)
+
+    # Re-derived from the untouched original so that only the keys that
+    # actually changed are rewritten: a field given a value it already
+    # holds keeps its own quoting style, byte for byte.
+    metadata, body = frontmatter.parse(original_text, filename=str(vacancy_path))
+    for change in changes:
+        _apply_field_to_metadata(metadata, change.field, change.new)
+
+    new_body = _append_edit_history(body, changes)
+    _atomic_write(
+        vacancy_path, frontmatter.serialize(metadata, new_body), overwrite=True
+    )
+
+    reindex(vault=vault_root)
+
+    return EditResult(vacancy_id=vacancy_id, changed=True, changes=changes)
 
 
 # --- Writing: create_vacancy() ------------------------------------------

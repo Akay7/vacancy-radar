@@ -128,12 +128,13 @@ uv run vacancy-radar list --needs-review
 ```
 
 For each one, see if there's now enough context (a company name, a
-half-remembered title) to fill in the real `role` — `set_status`/
-`add_document` update details on an existing vacancy; there's no
-in-place edit for `role` itself; if the role
-was wrong rather than merely unknown, that's a case for the user to
-fix by hand in the vacancy's frontmatter, not something either tool
-does.
+half-remembered title) to fill in the real `role` — `edit_vacancy`
+sets it in place, whether it was merely `unknown` at import time or
+recorded wrong, and records the correction in the vacancy's edit
+history. Drop the `needs_review` tag in the same call, since
+`edit_vacancy`'s `tags` replaces the whole list: pass the tags you
+want to keep. Use it for the other fields a hurried import got wrong
+too — a `source_url` you only found later, a recruiter's name.
 
 ## Worked example: non-English headers
 

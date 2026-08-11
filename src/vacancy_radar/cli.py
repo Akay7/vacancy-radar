@@ -118,25 +118,20 @@ def _parse_kind(value: str) -> DocumentKind:
 
 def _resolve_vacancy_or_fail(query: str) -> str:
     """Every write command that takes a vacancy argument resolves it
-    this way: `core.resolve`, branching only on which field came back
-    (mirrors `show_command`'s branching, design.md decision 1) - an
-    ambiguous or unresolved query prints and exits non-zero *before*
-    any write command goes on to call a `core.py` write function."""
+    this way: `core.resolve_vacancy`, which applies `resolve`'s tiers
+    and then narrows a company-tier match to that company's single
+    vacancy (resolve-write-target-vacancy's design.md decision 4). This
+    function holds no resolution rule of its own - only the rendering
+    of what came back. An ambiguous or unresolved query prints and
+    exits non-zero *before* any write command goes on to call a
+    `core.py` write function."""
     try:
-        resolution = core.resolve(query)
+        return core.resolve_vacancy(query)
+    except core.AmbiguousEntityError as exc:
+        _render_candidates(query, exc.candidates)
+        raise typer.Exit(code=1) from None
     except _CORE_ERRORS as exc:
         _fail(exc)
-
-    if resolution.vacancy_id is not None:
-        return resolution.vacancy_id
-    if resolution.candidates:
-        _render_candidates(query, resolution.candidates)
-        raise typer.Exit(code=1)
-    if resolution.company_slug is not None:
-        error_console.print(f"Error: {query!r} resolved to a company, not a vacancy")
-        raise typer.Exit(code=1)
-    error_console.print(f"Error: nothing in the vault matches {query!r}")
-    raise typer.Exit(code=1)
 
 
 def _render_write_outcome(
@@ -588,6 +583,112 @@ def status_set_command(  # noqa: PLR0913 - each option mirrors set_status's own 
         )
     else:
         console.print(f"{change.vacancy_id}: unchanged ({change.new_status.value})")
+
+
+# --- edit --------------------------------------------------------------
+
+
+def _parse_tags_option(value: str | None) -> list[str] | None:
+    """`--tags` replaces the whole list (edit-vacancy-fields' design.md
+    decision 9): a comma-separated value becomes that exact list, and an
+    empty value becomes the empty list - which is why an empty string
+    must not read as "option not given"."""
+    if value is None:
+        return None
+    return [tag.strip() for tag in value.split(",") if tag.strip()]
+
+
+def _render_edit_outcome(result: core.EditResult, *, as_json: bool) -> None:
+    if as_json:
+        _print_json(
+            {
+                "outcome": "changed" if result.changed else "unchanged",
+                "vacancy_id": result.vacancy_id,
+                "changed_fields": list(result.changed_fields),
+                "changes": [
+                    {"field": c.field, "old": c.old, "new": c.new}
+                    for c in result.changes
+                ],
+            }
+        )
+        return
+
+    if not result.changed:
+        console.print(f"{result.vacancy_id}: unchanged")
+        return
+
+    console.print(f"{result.vacancy_id}: {len(result.changes)} field(s) changed")
+    for change in result.changes:
+        old = core.render_history_value(change.old)
+        new = core.render_history_value(change.new)
+        console.print(f"  {change.field}: {old} -> {new}")
+
+
+@app.command("edit")
+def edit_command(  # noqa: PLR0913, PLR0917 - one option per editable field, mirroring core.edit_vacancy
+    vacancy: Annotated[
+        str, typer.Argument(help="A vacancy id, company name, or fuzzy match.")
+    ],
+    source_url: Annotated[
+        str | None, typer.Option("--source-url", help="The posting's URL.")
+    ] = None,
+    role: Annotated[str | None, typer.Option("--role", help="The job title.")] = None,
+    stage_note: Annotated[
+        str | None, typer.Option("--stage-note", help="Free-text stage note.")
+    ] = None,
+    salary_note: Annotated[
+        str | None, typer.Option("--salary-note", help="Free-text salary note.")
+    ] = None,
+    recruiter: Annotated[
+        str | None, typer.Option("--recruiter", help="The recruiter's name.")
+    ] = None,
+    external_id: Annotated[
+        str | None, typer.Option("--external-id", help="An external tracker's id.")
+    ] = None,
+    tags: Annotated[
+        str | None,
+        typer.Option("--tags", help="Comma-separated; replaces the whole tag list."),
+    ] = None,
+    found_date: Annotated[
+        str | None, typer.Option("--found-date", help="ISO date the vacancy was found.")
+    ] = None,
+    applied_date: Annotated[
+        str | None, typer.Option("--applied-date", help="ISO date you applied.")
+    ] = None,
+    clear: Annotated[
+        list[str] | None,
+        typer.Option("--clear", help="Remove a field; repeatable."),
+    ] = None,
+    *,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit JSON instead of plain output.")
+    ] = False,
+) -> None:
+    """Edit a vacancy's fields, validating the result.
+
+    Status is not editable here - use 'status set', which validates the
+    transition. Company is not editable at all.
+    """
+    vacancy_id = _resolve_vacancy_or_fail(vacancy)
+    values: dict[str, object | None] = {
+        "source_url": source_url,
+        "role": role,
+        "stage_note": stage_note,
+        "salary_note": salary_note,
+        "recruiter": recruiter,
+        "external_id": external_id,
+        "tags": _parse_tags_option(tags),
+        "found_date": _parse_date_option(found_date, option="--found-date"),
+        "applied_date": _parse_date_option(applied_date, option="--applied-date"),
+    }
+
+    try:
+        edits = core.resolve_field_edits(values, clear)
+        result = core.edit_vacancy(vacancy_id, vault=None, **edits)
+    except _CORE_ERRORS as exc:
+        _fail(exc)
+
+    _render_edit_outcome(result, as_json=as_json)
 
 
 # --- add ---------------------------------------------------------------

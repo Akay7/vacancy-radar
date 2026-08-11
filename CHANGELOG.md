@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/), and this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Editing a vacancy's fields**, not just its status: `vacancy-radar
+  edit` and the `edit_vacancy` MCP tool set `source_url`, `role`,
+  `stage_note`, `salary_note`, `recruiter`, `external_id`, `tags`,
+  `found_date`, and `applied_date` in one validated, atomic write.
+  Nullable fields are removed with `--clear`/`clear`; `--tags` replaces
+  the whole list. Status stays with `status set` (which validates the
+  transition), and a vacancy's company and id remain immutable.
+- **Edit history.** Every applied edit appends `- <date>: <field>: <old>
+  -> <new>` to a `## Edit History` block in `vacancy.md`, so an
+  overwritten frontmatter value still leaves an append-only record in
+  the vault. A call that would change nothing writes nothing.
+
+### Fixed
+
+- **A company name now works as a write command's vacancy argument.**
+  `note`, `status set`, `edit`, and `add` documented that a vacancy
+  could be named by company or fuzzy match, but every company-tier
+  match was rejected as "resolved to a company, not a vacancy". A
+  company holding exactly one vacancy now resolves to it, via the new
+  `core.resolve_vacancy`; one holding several still refuses, naming
+  every candidate id. `core.resolve` itself is unchanged, so `show` and
+  the read tools still answer a company query with a company.
+
+### Changed
+
+- Status- and edit-history entries are now appended inside their own
+  section rather than at the end of the body, so the two blocks can
+  coexist in any order. Output for a file whose last section is
+  `## Status History` is unchanged.
+
 ## [0.1.0] - 2026-08-10
 
 First release: a local-first job application tracker built around a

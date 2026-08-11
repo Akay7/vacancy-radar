@@ -1299,3 +1299,409 @@ def test_write_command_json_error_case_emits_no_stdout_json(
     # The error path (_fail) never reaches _print_json - matches cli-read's
     # existing convention (Error: ... on stderr, nothing structured on stdout).
     assert result.stdout.strip() == ""
+
+
+# --- Section 15 (edit-vacancy-fields): edit command -------------------------
+
+
+def _edited_vault(vault: Path, **overrides: object) -> Path:
+    """`_minimal_vault` with v1 already applied, so `applied_date` and
+    the nullable fields an edit test needs are present."""
+    _init_vault(vault)
+    _write_company(vault, "tiny-corp", "Tiny Corp")
+    fields: dict[str, object] = {
+        "status": Status.APPLIED,
+        "applied_date": date(2026, 1, 3),
+    }
+    fields.update(overrides)
+    _write_vacancy(vault, "tiny-corp", "v1", _simple_vacancy("v1", **fields))
+    return vault
+
+
+def test_edit_sets_a_single_field_and_exits_zero(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        ["edit", "v1", "--recruiter", "Anna K."],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    assert read_vault(vault).vacancies["v1"].recruiter == "Anna K."
+
+
+def test_edit_sets_several_fields_in_one_invocation(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        [
+            "edit",
+            "v1",
+            "--source-url",
+            "https://new.example/careers/1",
+            "--recruiter",
+            "Anna K.",
+        ],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    updated = read_vault(vault).vacancies["v1"]
+    assert updated.source_url == "https://new.example/careers/1"
+    assert updated.recruiter == "Anna K."
+
+
+def test_edit_help_exposes_no_status_company_or_id_option() -> None:
+    result = runner.invoke(app, ["edit", "--help"], env=_ENV_WIDE)
+
+    assert result.exit_code == 0
+    assert "--status" not in result.output
+    assert "--company" not in result.output
+    assert "--id" not in result.output
+    for option in ("--source-url", "--role", "--tags", "--clear"):
+        assert option in result.output
+
+
+def test_edit_clear_removes_a_nullable_field(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault", recruiter="Anna K.")
+
+    result = runner.invoke(
+        app, ["edit", "v1", "--clear", "recruiter"], env={"VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code == 0
+    metadata, _ = frontmatter.parse(
+        (vault / "tiny-corp" / "v1" / "vacancy.md").read_text(encoding="utf-8")
+    )
+    assert "recruiter" not in metadata
+
+
+def test_edit_clear_repeats_for_several_fields(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault", recruiter="Anna K.", salary_note="120k")
+
+    result = runner.invoke(
+        app,
+        ["edit", "v1", "--clear", "recruiter", "--clear", "salary-note"],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    updated = read_vault(vault).vacancies["v1"]
+    assert updated.recruiter is None
+    assert updated.salary_note is None
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_in_output"),
+    [
+        (["--clear", "status"], "status"),
+        (["--clear", "role"], "role"),
+        (["--recruiter", "Anna K.", "--clear", "recruiter"], "recruiter"),
+    ],
+)
+def test_edit_rejects_bad_clear_requests(
+    tmp_path: Path, args: list[str], expected_in_output: str
+) -> None:
+    vault = _edited_vault(tmp_path / "vault", recruiter="Bob")
+    vacancy_path = vault / "tiny-corp" / "v1" / "vacancy.md"
+    before = vacancy_path.read_bytes()
+
+    result = runner.invoke(
+        app, ["edit", "v1", *args], env={**_ENV_WIDE, "VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code != 0
+    assert expected_in_output in result.output
+    assert vacancy_path.read_bytes() == before
+
+
+def test_edit_malformed_date_option_exits_nonzero(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault")
+    vacancy_path = vault / "tiny-corp" / "v1" / "vacancy.md"
+    before = vacancy_path.read_bytes()
+
+    result = runner.invoke(
+        app,
+        ["edit", "v1", "--found-date", "11-08-2026"],
+        env={**_ENV_WIDE, "VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code != 0
+    assert "--found-date" in result.output
+    assert vacancy_path.read_bytes() == before
+
+
+def test_edit_invalid_source_url_exits_nonzero(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault")
+    vacancy_path = vault / "tiny-corp" / "v1" / "vacancy.md"
+    before = vacancy_path.read_bytes()
+
+    result = runner.invoke(
+        app,
+        ["edit", "v1", "--source-url", "ftp://example.com/x"],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code != 0
+    assert vacancy_path.read_bytes() == before
+
+
+def test_edit_ambiguous_vacancy_query_writes_nothing(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "widget-us", "Widget Inc")
+    _write_company(vault, "widget-eu", "Widget Inc")
+
+    result = runner.invoke(
+        app,
+        ["edit", "widget inc", "--recruiter", "Anna K."],
+        env={**_ENV_WIDE, "VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code != 0
+    assert "widget-us" in result.output
+    assert "widget-eu" in result.output
+
+
+def test_edit_tags_replaces_the_list(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault", tags=["remote", "python"])
+
+    result = runner.invoke(
+        app, ["edit", "v1", "--tags", "onsite"], env={"VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code == 0
+    assert read_vault(vault).vacancies["v1"].tags == ["onsite"]
+
+
+def test_edit_empty_tags_value_empties_the_list(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault", tags=["remote"])
+
+    result = runner.invoke(
+        app, ["edit", "v1", "--tags", ""], env={"VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code == 0
+    assert read_vault(vault).vacancies["v1"].tags == []
+
+
+def test_edit_json_reports_the_changed_fields(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        ["edit", "v1", "--recruiter", "Anna K.", "--json"],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["outcome"] == "changed"
+    assert payload["vacancy_id"] == "v1"
+    assert payload["changed_fields"] == ["recruiter"]
+
+
+def test_edit_json_reports_a_no_op(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app, ["edit", "v1", "--json"], env={"VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["outcome"] == "unchanged"
+    assert payload["changed_fields"] == []
+
+
+def test_edit_plain_output_names_each_changed_field(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault", recruiter="Bob")
+
+    result = runner.invoke(
+        app,
+        ["edit", "v1", "--recruiter", "Anna K."],
+        env={**_ENV_WIDE, "VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    assert "v1" in result.output
+    assert "recruiter" in result.output
+    assert "Bob" in result.output
+    assert "Anna K." in result.output
+
+
+def test_edit_plain_output_reports_a_no_op_as_unchanged(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app, ["edit", "v1"], env={**_ENV_WIDE, "VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code == 0
+    assert "unchanged" in result.output
+
+
+def test_edit_unknown_vacancy_exits_nonzero(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        ["edit", "does-not-exist", "--recruiter", "Anna K."],
+        env={**_ENV_WIDE, "VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code != 0
+
+
+# --- Section 16 (resolve-write-target-vacancy): company-name arguments ------
+
+
+def _one_vacancy_company_vault(vault: Path) -> Path:
+    """A company with exactly one vacancy - the case a write command's
+    vacancy argument may name by company instead of by id."""
+    _init_vault(vault)
+    _write_company(vault, "tiny-corp", "Tiny Corp")
+    _write_vacancy(
+        vault,
+        "tiny-corp",
+        "v1",
+        _simple_vacancy("v1", status=Status.APPLIED, applied_date=date(2026, 1, 3)),
+    )
+    return vault
+
+
+def _two_vacancy_company_vault(vault: Path) -> Path:
+    _one_vacancy_company_vault(vault)
+    _write_vacancy(
+        vault,
+        "tiny-corp",
+        "v2",
+        _simple_vacancy("v2", status=Status.APPLIED, applied_date=date(2026, 1, 4)),
+    )
+    return vault
+
+
+def test_note_accepts_a_one_vacancy_company_by_name(tmp_path: Path) -> None:
+    vault = _one_vacancy_company_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        ["note", "Tiny Corp", "Called the recruiter."],
+        env={**_ENV_WIDE, "VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    assert list((vault / "tiny-corp" / "v1" / "documents").glob("*.md"))
+
+
+def test_status_set_accepts_a_one_vacancy_company_by_fuzzy_name(
+    tmp_path: Path,
+) -> None:
+    vault = _one_vacancy_company_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        ["status", "set", "Tiny", "screening"],
+        env={**_ENV_WIDE, "VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    assert read_vault(vault).vacancies["v1"].status == Status.SCREENING
+
+
+def test_edit_accepts_a_one_vacancy_company_by_name(tmp_path: Path) -> None:
+    vault = _one_vacancy_company_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        ["edit", "Tiny Corp", "--recruiter", "Anna K."],
+        env={**_ENV_WIDE, "VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    assert read_vault(vault).vacancies["v1"].recruiter == "Anna K."
+
+
+def test_add_accepts_a_one_vacancy_company_by_name(tmp_path: Path) -> None:
+    vault = _one_vacancy_company_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        [
+            "add",
+            "Tiny Corp",
+            "--kind",
+            "email",
+            "--title",
+            "Recruiter reply",
+            "--date",
+            "2026-01-16",
+            "--stdin",
+        ],
+        env={**_ENV_WIDE, "VAULT_PATH": str(vault)},
+        input="Email body.\n",
+    )
+
+    assert result.exit_code == 0
+    assert list((vault / "tiny-corp" / "v1" / "documents").glob("*.md"))
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["note", "Tiny Corp", "A note."],
+        ["status", "set", "Tiny Corp", "screening"],
+        ["edit", "Tiny Corp", "--recruiter", "Anna K."],
+    ],
+)
+def test_write_commands_reject_a_company_with_several_vacancies(
+    tmp_path: Path, args: list[str]
+) -> None:
+    vault = _two_vacancy_company_vault(tmp_path / "vault")
+    before = {p: p.read_bytes() for p in vault.rglob("*") if p.is_file()}
+
+    result = runner.invoke(app, args, env={**_ENV_WIDE, "VAULT_PATH": str(vault)})
+
+    assert result.exit_code != 0
+    assert "v1" in result.output
+    assert "v2" in result.output
+    assert {p: p.read_bytes() for p in vault.rglob("*") if p.is_file()} == before
+
+
+def test_write_commands_reject_a_company_with_no_vacancies(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "tiny-corp", "Tiny Corp")
+    before = {p: p.read_bytes() for p in vault.rglob("*") if p.is_file()}
+
+    result = runner.invoke(
+        app,
+        ["note", "Tiny Corp", "A note."],
+        env={**_ENV_WIDE, "VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code != 0
+    assert {p: p.read_bytes() for p in vault.rglob("*") if p.is_file()} == before
+
+
+def test_write_commands_still_reject_an_ambiguous_company_query(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "widget-us", "Widget Inc")
+    _write_company(vault, "widget-eu", "Widget Inc")
+    _write_vacancy(vault, "widget-us", "v1", _simple_vacancy("v1", slug="widget-us"))
+    _write_vacancy(vault, "widget-eu", "v2", _simple_vacancy("v2", slug="widget-eu"))
+
+    result = runner.invoke(
+        app,
+        ["note", "widget inc", "A note."],
+        env={**_ENV_WIDE, "VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code != 0
+    assert "widget-us" in result.output
+    assert "widget-eu" in result.output

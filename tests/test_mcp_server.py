@@ -43,7 +43,7 @@ _MODEL_NOT_LOADED_AT_BUILD_MSG = "embedding model should not load at server buil
 _MODEL_NOT_LOADED_FOR_KEYWORD_MSG = (
     "embedding model should not load for a keyword search"
 )
-_EXPECTED_TOOL_COUNT = 11
+_EXPECTED_TOOL_COUNT = 12
 
 
 def _init_vault(vault: Path) -> None:
@@ -1125,7 +1125,7 @@ def test_find_existing_tool_matches_source_url_across_company_spellings(
 # --- Section 20: annotations / tool-list membership -------------------
 
 
-def test_tool_list_is_exactly_the_eleven_specified_tools() -> None:
+def test_tool_list_is_exactly_the_twelve_specified_tools() -> None:
     server = mcp_server.build_server(Path("/vault"))
     names = {t.name for t in run(server.list_tools())}
     assert names == {
@@ -1138,6 +1138,7 @@ def test_tool_list_is_exactly_the_eleven_specified_tools() -> None:
         "find_existing",
         "append_note",
         "set_status",
+        "edit_vacancy",
         "add_document",
         "create_vacancy",
     }
@@ -1168,7 +1169,13 @@ def test_read_tools_have_read_only_hint_true() -> None:
 
 def test_write_tools_have_read_only_and_destructive_hint_false() -> None:
     server = mcp_server.build_server(Path("/vault"))
-    write_tools = {"append_note", "set_status", "add_document", "create_vacancy"}
+    write_tools = {
+        "append_note",
+        "set_status",
+        "edit_vacancy",
+        "add_document",
+        "create_vacancy",
+    }
     for tool in run(server.list_tools()):
         if tool.name in write_tools:
             assert tool.annotations.read_only_hint is False
@@ -1447,3 +1454,193 @@ def test_subprocess_stdout_is_json_rpc_only_and_iserror_is_structured(
         # makes; stderr is captured for debugging only, not asserted on
         # (a clean run may have no diagnostics at all).
         assert stderr_tail is not None
+
+
+# --- Section 22 (edit-vacancy-fields): edit_vacancy tool --------------------
+
+
+def _editable_vault(vault: Path, **overrides: object) -> Path:
+    """`_minimal_vault`'s vacancy, applied rather than found, so the
+    nullable fields an edit test needs can be set and cleared."""
+    _init_vault(vault)
+    _write_company(vault, "acme", "Acme Corp")
+    fields: dict[str, object] = {
+        "id": "v1",
+        "company": "Acme Corp",
+        "company_slug": "acme",
+        "role": "Engineer",
+        "source_url": "https://jobs.acme.example/v1",
+        "status": Status.APPLIED,
+        "found_date": date(2026, 1, 1),
+        "applied_date": date(2026, 1, 3),
+    }
+    fields.update(overrides)
+    vacancy_dir = _write_vacancy(vault, "acme", "v1", Vacancy(**fields))  # type: ignore[arg-type]
+    _write_document(
+        vacancy_dir,
+        Document(
+            id="v1-doc1",
+            vacancy_id="v1",
+            kind=DocumentKind.NOTE,
+            title="Note",
+            date=date(2026, 1, 2),
+        ),
+    )
+    return vault
+
+
+def test_edit_vacancy_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    vault = Path("/vault")
+    server = mcp_server.build_server(vault)
+    result = core.EditResult(
+        vacancy_id="v1",
+        changed=True,
+        changes=(
+            core.FieldChange(
+                field="source_url",
+                old="https://jobs.acme.example/v1",
+                new="https://acme.example/2",
+            ),
+        ),
+    )
+    mock = Mock(return_value=result)
+    monkeypatch.setattr(core, "edit_vacancy", mock)
+
+    call = run(
+        server.call_tool(
+            "edit_vacancy",
+            {"vacancy_id": "v1", "source_url": "https://acme.example/2"},
+        )
+    )
+
+    mock.assert_called_once_with("v1", vault=vault, source_url="https://acme.example/2")
+    payload = call.structured_content
+    assert payload["vacancy_id"] == "v1"
+    assert payload["changed"] is True
+    assert payload["changes"] == [
+        {
+            "field": "source_url",
+            "old": "https://jobs.acme.example/v1",
+            "new": "https://acme.example/2",
+        }
+    ]
+
+
+def test_edit_vacancy_schema_matches_core_param_names() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    tools = {t.name: t for t in run(server.list_tools())}
+    schema = tools["edit_vacancy"].input_schema
+
+    assert set(schema["properties"]) == {
+        "vacancy_id",
+        *core.EDITABLE_FIELDS,
+        "clear",
+    }
+    assert schema["required"] == ["vacancy_id"]
+
+
+def test_edit_vacancy_tool_omitted_parameters_leave_fields_untouched(
+    tmp_path: Path,
+) -> None:
+    vault = _editable_vault(tmp_path / "vault", recruiter="Anna K.")
+    server = mcp_server.build_server(vault)
+
+    run(
+        server.call_tool(
+            "edit_vacancy",
+            {"vacancy_id": "v1", "source_url": "https://acme.example/2"},
+        )
+    )
+
+    updated = read_vault(vault).vacancies["v1"]
+    assert updated.recruiter == "Anna K."
+    assert updated.source_url == "https://acme.example/2"
+
+
+def test_edit_vacancy_tool_clear_removes_a_field(tmp_path: Path) -> None:
+    vault = _editable_vault(tmp_path / "vault", recruiter="Anna K.")
+    server = mcp_server.build_server(vault)
+
+    run(server.call_tool("edit_vacancy", {"vacancy_id": "v1", "clear": ["recruiter"]}))
+
+    metadata, _ = frontmatter.parse(
+        (vault / "acme" / "v1" / "vacancy.md").read_text(encoding="utf-8")
+    )
+    assert "recruiter" not in metadata
+
+
+def test_edit_vacancy_tool_edit_is_visible_to_get_vacancy(tmp_path: Path) -> None:
+    vault = _editable_vault(tmp_path / "vault")
+    build_index(read_vault(vault), default_index_path(vault))
+    server = mcp_server.build_server(vault)
+
+    run(
+        server.call_tool("edit_vacancy", {"vacancy_id": "v1", "role": "Staff Engineer"})
+    )
+    detail = run(server.call_tool("get_vacancy", {"id_or_query": "v1"}))
+
+    assert detail.structured_content["role"] == "Staff Engineer"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_error"),
+    [
+        (
+            {"vacancy_id": "v1", "source_url": "ftp://example.com/x"},
+            "InvalidVacancyDataError",
+        ),
+        ({"vacancy_id": "v1", "clear": ["status"]}, "UneditableFieldError"),
+        ({"vacancy_id": "v1", "clear": ["role"]}, "NotNullableFieldError"),
+        (
+            {"vacancy_id": "v1", "recruiter": "Anna K.", "clear": ["recruiter"]},
+            "ConflictingEditError",
+        ),
+        (
+            {"vacancy_id": "does-not-exist", "recruiter": "Anna K."},
+            "EntityNotFoundError",
+        ),
+    ],
+)
+def test_edit_vacancy_tool_typed_errors_leave_the_vault_untouched(
+    tmp_path: Path, arguments: dict[str, object], expected_error: str
+) -> None:
+    vault = _editable_vault(tmp_path / "vault")
+    server = mcp_server.build_server(vault)
+    before = {
+        p.relative_to(vault): p.read_bytes() for p in vault.rglob("*") if p.is_file()
+    }
+
+    with pytest.raises(ToolError, match=expected_error):
+        run(server.call_tool("edit_vacancy", arguments))
+
+    after = {
+        p.relative_to(vault): p.read_bytes() for p in vault.rglob("*") if p.is_file()
+    }
+    assert after == before
+
+
+def test_edit_vacancy_tool_touches_no_file_but_the_target_vacancy(
+    tmp_path: Path,
+) -> None:
+    vault = _editable_vault(tmp_path / "vault")
+    server = mcp_server.build_server(vault)
+    vacancy_md = vault / "acme" / "v1" / "vacancy.md"
+    before = {
+        p.relative_to(vault): p.read_bytes()
+        for p in vault.rglob("*")
+        if p.is_file()
+        and p != vacancy_md
+        and default_index_path(vault) not in p.parents
+    }
+
+    run(server.call_tool("edit_vacancy", {"vacancy_id": "v1", "recruiter": "Anna K."}))
+
+    after = {
+        p.relative_to(vault): p.read_bytes()
+        for p in vault.rglob("*")
+        if p.is_file()
+        and p != vacancy_md
+        and default_index_path(vault) not in p.parents
+    }
+    assert after == before
+    assert vacancy_md.read_bytes() != before.get(vacancy_md.relative_to(vault))

@@ -1,5 +1,9 @@
 # vacancy-radar
 
+[![PyPI](https://img.shields.io/pypi/v/vacancy-radar.svg)](https://pypi.org/project/vacancy-radar/)
+[![Python versions](https://img.shields.io/pypi/pyversions/vacancy-radar.svg)](https://pypi.org/project/vacancy-radar/)
+[![Coverage](https://codecov.io/gh/Akay7/vacancy-radar/branch/main/graph/badge.svg)](https://codecov.io/gh/Akay7/vacancy-radar)
+
 A local-first job application tracker. A markdown vault is the source of
 truth; a derived LanceDB index provides hybrid BM25 + vector search; an MCP
 server exposes read/write tools to any LLM client.
@@ -22,9 +26,10 @@ it. Three properties follow from that, and they are the point:
   directory you chose. Grep it, edit it in any editor, put it in git,
   back it up like anything else. The index is derived and disposable —
   delete it and rebuild it any time.
-- **It doesn't lose things.** Every write is append-only or a validated
-  status transition. There is no delete command anywhere in the CLI, and
-  no tool that overwrites what you already recorded.
+- **It doesn't lose things.** Every write is append-only, a validated
+  status transition, or a validated field edit that records what it
+  changed. There is no delete command anywhere in the CLI, and no tool
+  that discards what you already recorded.
 - **An LLM can use it directly.** The MCP server exposes the same
   operations the CLI has, so you can ask your assistant to find the
   thread with a company, file a recruiter's email, or move a vacancy to
@@ -154,7 +159,7 @@ exist.
 
 ### 4. Start talking to it
 
-Restart the client, and the eleven tools are available. Things worth
+Restart the client, and the twelve tools are available. Things worth
 saying first:
 
 > I applied to Acme Corp for a Backend Engineer role today, found on
@@ -192,8 +197,9 @@ flowchart TD
         C2["new\ncreate a vacancy"]
         C3["add / note\nattach documents & notes"]
         C4["status set\nmove it through the pipeline"]
-        C5["list / show / search\nread it back"]
-        C1 --> C2 --> C3 --> C4 --> C5
+        C5["edit\ncorrect a field"]
+        C6["list / show / search\nread it back"]
+        C1 --> C2 --> C3 --> C4 --> C5 --> C6
     end
 
     subgraph MCP["LLM client — MCP tools (vacancy-radar-mcp)"]
@@ -202,12 +208,13 @@ flowchart TD
         M2["create_vacancy\n(conversational import)"]
         M3["add_document / append_note"]
         M4["set_status"]
-        M5["list_vacancies / get_vacancy / search"]
-        M1 --> M2 --> M3 --> M4 --> M5
+        M5["edit_vacancy"]
+        M6["list_vacancies / get_vacancy / search"]
+        M1 --> M2 --> M3 --> M4 --> M5 --> M6
     end
 
-    C5 --> Vault[("Markdown vault\n+ LanceDB index")]
-    M5 --> Vault
+    C6 --> Vault[("Markdown vault\n+ LanceDB index")]
+    M6 --> Vault
 ```
 
 `init` and `reindex` are CLI-only (see their sections below for why);
@@ -249,19 +256,23 @@ vacancy-radar doctor
 
 ### Writing
 
-`note`, `status set`, `add`, `new`, and `reindex` write to the vault.
-Every write is append-only or a validated status transition - nothing
-here deletes or overwrites existing content, and there is no delete
-command anywhere in the CLI. `note`, `status set`, and `add` accept a vacancy by id, company
-name, or unambiguous fuzzy match, resolved the same way `show` resolves
-its argument; an ambiguous match prints the candidates and exits
-non-zero without writing anything. `--json` follows the same stable,
-documented-shape convention as the read commands above.
+`note`, `status set`, `edit`, `add`, `new`, and `reindex` write to the
+vault. Every write is append-only, a validated status transition, or a
+validated field edit that records what it changed in the vacancy's own
+edit history - nothing here deletes existing content, and there is no
+delete command anywhere in the CLI. `note`, `status set`, `edit`, and `add` accept a vacancy by id, company
+slug, company name, or unambiguous fuzzy match - a company argument
+resolves to that company's vacancy when it has exactly one. Anything
+that can't be narrowed to a single vacancy - a name matching two
+companies, or a company holding two vacancies - prints what it matched
+and exits non-zero without writing anything. `--json` follows the same
+stable, documented-shape convention as the read commands above.
 
 ```bash
-# A vacancy argument is an id, a company name/slug (if it resolves to
-# exactly one vacancy), or an unambiguous fuzzy match - the same rule
-# `show` uses. A company with several vacancies needs the vacancy id.
+# A vacancy argument is an id, a company name/slug (when that company
+# has exactly one vacancy), or an unambiguous fuzzy match. A company
+# with several vacancies needs the vacancy id - the error names every
+# candidate id, so the fix is to paste one of them.
 
 # Append a dated note. The filename is always derived from the date -
 # never something you (or an LLM) supply.
@@ -274,6 +285,26 @@ vacancy-radar status set 2022-03-22-acme-corp-backend-engineer \
     applied --applied-date 2026-01-15
 vacancy-radar status set 2022-03-22-acme-corp-backend-engineer \
     found --force
+
+# Correct a vacancy's stored fields - a posting URL that moved, a role
+# captured as "unknown", a mistyped date. One option per editable
+# field; several can change in one call. Every applied change is
+# appended to the vacancy's "## Edit History" block.
+vacancy-radar edit 2022-03-22-acme-corp-backend-engineer \
+    --source-url https://acme.example/careers/backend \
+    --role "Senior Backend Engineer"
+
+# Remove a field with --clear (repeatable). Only the nullable fields can
+# be cleared: source-url, stage-note, salary-note, recruiter,
+# external-id, applied-date.
+vacancy-radar edit 2022-03-22-acme-corp-backend-engineer \
+    --clear recruiter --clear salary-note
+
+# --tags replaces the whole list rather than appending to it; --tags ""
+# empties it. Status is not editable here - `status set` owns it, so a
+# transition is always validated against the status graph. A vacancy's
+# company and id cannot be changed at all.
+vacancy-radar edit 2022-03-22-acme-corp-backend-engineer --tags "remote,python"
 
 # File a *text* document (posting, email, note, or takehome) from a
 # file or stdin. --external-id makes re-filing the same source (e.g.
@@ -349,7 +380,7 @@ default (2026-07-28, SEP-2577), so `--vault`/`VAULT_PATH` are the only
 two ways to point the server at a vault, exactly like configuring any
 other stdio MCP server.
 
-**Eleven tools**, matching `core.py`'s functions one for one - argument
+**Twelve tools**, matching `core.py`'s functions one for one - argument
 marshalling only, no filtering/sorting/business logic of its own:
 
 | tool | delegates to |
@@ -363,6 +394,7 @@ marshalling only, no filtering/sorting/business logic of its own:
 | `find_existing` | `core.find_existing` |
 | `append_note` | `core.append_note` |
 | `set_status` | `core.set_status` |
+| `edit_vacancy` | `core.edit_vacancy` |
 | `add_document` | `core.add_document` |
 | `create_vacancy` | `core.create_vacancy` |
 

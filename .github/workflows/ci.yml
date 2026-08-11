@@ -8,13 +8,21 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      # One version failing shouldn't hide whether the others pass - the
+      # useful signal is which of them broke, not that something did.
+      fail-fast: false
+      matrix:
+        # Every stable CPython this package supports; `requires-python`
+        # in pyproject.toml sets the floor.
+        python-version: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v9.0.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Sync dependencies
         run: uv sync --all-groups
@@ -29,8 +37,21 @@ jobs:
           # version, not once per test run.
           key: huggingface-BAAI-bge-small-en-v1.5
 
+      # Lint and format results don't vary by interpreter, so running
+      # this on every matrix leg would just triple the wall clock.
       - name: Pre-commit hooks
+        if: matrix.python-version == '3.12'
         run: uv run pre-commit run --all-files
 
       - name: Test
-        run: uv run pytest
+        run: uv run pytest --cov --cov-report=xml
+
+      # One upload per commit. The legs exercise the same lines, so
+      # uploading from all three only makes the reported number depend on
+      # how many have finished.
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml

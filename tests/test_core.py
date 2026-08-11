@@ -1918,3 +1918,713 @@ def test_write_sequence_never_removes_a_preexisting_file(tmp_path: Path) -> None
 
     after = _snapshot_files(vault)
     assert before <= set(after)
+
+
+# --- Section 7 (edit-vacancy-fields): _append_to_section() ------------------
+
+_append_to_section = core._append_to_section  # noqa: SLF001 - the section-aware append this change adds, exercised directly
+
+
+def test_append_to_section_matches_prior_end_of_body_append() -> None:
+    """The status-history block is the body's last section in every file
+    this project writes; the section-aware append must not change a byte
+    of what the earlier end-of-body append produced for that shape."""
+    body = "# Engineer\n\n## Status History\n- 2026-01-01: found -> applied\n"
+
+    appended = _append_to_section(body, core.STATUS_HISTORY_HEADING, ["- new"])
+
+    assert appended == f"{body.rstrip(chr(10))}\n- new\n"
+
+
+def test_append_to_section_creates_a_missing_section_at_the_end_of_the_body() -> None:
+    body = "# Engineer\n\nSome prose.\n"
+
+    appended = _append_to_section(body, core.EDIT_HISTORY_HEADING, ["- entry"])
+
+    assert appended == f"{body}\n{core.EDIT_HISTORY_HEADING}\n- entry\n"
+
+
+def test_append_to_section_creates_a_missing_section_in_an_empty_body() -> None:
+    appended = _append_to_section("", core.EDIT_HISTORY_HEADING, ["- entry"])
+
+    assert appended == f"{core.EDIT_HISTORY_HEADING}\n- entry\n"
+
+
+def test_append_to_section_inserts_before_a_following_section() -> None:
+    body = (
+        "# Engineer\n\n"
+        "## Status History\n- 2026-01-01: found -> applied\n\n"
+        "## Edit History\n- 2026-01-02: role: a -> b\n"
+    )
+
+    appended = _append_to_section(
+        body, core.STATUS_HISTORY_HEADING, ["- 2026-01-03: applied -> screening"]
+    )
+
+    assert appended == (
+        "# Engineer\n\n"
+        "## Status History\n"
+        "- 2026-01-01: found -> applied\n"
+        "- 2026-01-03: applied -> screening\n\n"
+        "## Edit History\n- 2026-01-02: role: a -> b\n"
+    )
+
+
+def test_append_to_section_with_no_entries_returns_the_body_unchanged() -> None:
+    body = "# Engineer\n\n## Edit History\n- 2026-01-02: role: a -> b\n"
+
+    assert _append_to_section(body, core.EDIT_HISTORY_HEADING, []) == body
+
+
+def test_status_entry_lands_in_its_own_block_when_edit_history_follows(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    core.set_status("v2", "screening", vault=vault)
+    core.edit_vacancy("v2", recruiter="Anna K.", vault=vault)
+
+    core.set_status("v2", "interview", vault=vault)
+
+    _, body = frontmatter.parse(
+        (vault / "tiny-corp" / "v2" / "vacancy.md").read_text(encoding="utf-8")
+    )
+    status_block, edit_block = _history_blocks(body)
+    assert any("screening -> interview" in line for line in status_block)
+    assert not any("screening -> interview" in line for line in edit_block)
+    assert edit_block == [f"- {_today()}: recruiter: (none) -> Anna K."]
+
+
+def test_edit_entry_lands_in_its_own_block_when_status_history_precedes(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    core.set_status("v2", "screening", vault=vault)
+
+    core.edit_vacancy("v2", recruiter="Anna K.", vault=vault)
+
+    _, body = frontmatter.parse(
+        (vault / "tiny-corp" / "v2" / "vacancy.md").read_text(encoding="utf-8")
+    )
+    status_block, edit_block = _history_blocks(body)
+    assert status_block == [f"- {_today()}: applied -> screening"]
+    assert edit_block == [f"- {_today()}: recruiter: (none) -> Anna K."]
+
+
+def _today() -> str:
+    return datetime.now().astimezone().date().isoformat()
+
+
+def _tomorrow() -> date:
+    return datetime.now().astimezone().date() + timedelta(days=1)
+
+
+def _history_blocks(body: str) -> tuple[list[str], list[str]]:
+    """The entry lines of the status-history and edit-history blocks."""
+    blocks: dict[str, list[str]] = {
+        core.STATUS_HISTORY_HEADING: [],
+        core.EDIT_HISTORY_HEADING: [],
+    }
+    current: list[str] | None = None
+    for line in body.split("\n"):
+        if line.strip() in blocks:
+            current = blocks[line.strip()]
+        elif line.startswith("## "):
+            current = None
+        elif current is not None and line.strip():
+            current.append(line)
+    return blocks[core.STATUS_HISTORY_HEADING], blocks[core.EDIT_HISTORY_HEADING]
+
+
+# --- Section 7 (edit-vacancy-fields): edit-history entries ------------------
+
+
+def _edit_entries(vault: Path, vacancy_id: str = "v2") -> list[str]:
+    _, body = frontmatter.parse(
+        (vault / "tiny-corp" / vacancy_id / "vacancy.md").read_text(encoding="utf-8")
+    )
+    return _history_blocks(body)[1]
+
+
+def test_edit_appends_one_entry_per_changed_field(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, salary_note="120k")
+
+    core.edit_vacancy(
+        "v2",
+        source_url="https://new.example/careers/1",
+        recruiter="Anna K.",
+        salary_note="120k",
+        vault=vault,
+    )
+
+    entries = _edit_entries(vault)
+    assert [entry.split(": ")[1] for entry in entries] == ["source_url", "recruiter"]
+
+
+def test_edit_entry_names_the_date_and_both_values(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+
+    core.edit_vacancy("v2", source_url="https://new.example/careers/1", vault=vault)
+
+    expected = (
+        f"- {_today()}: source_url: "
+        "https://jobs.acme.example/v2 -> https://new.example/careers/1"
+    )
+    assert _edit_entries(vault) == [expected]
+
+
+def test_edit_entry_renders_an_absent_old_value_as_none(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+
+    core.edit_vacancy("v2", recruiter="Anna K.", vault=vault)
+
+    assert _edit_entries(vault) == [f"- {_today()}: recruiter: (none) -> Anna K."]
+
+
+def test_edit_entry_renders_a_cleared_value_as_none(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, recruiter="Anna K.")
+
+    core.edit_vacancy("v2", recruiter=None, vault=vault)
+
+    assert _edit_entries(vault) == [f"- {_today()}: recruiter: Anna K. -> (none)"]
+
+
+def test_edit_entry_for_a_multi_line_value_is_one_line(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+
+    core.edit_vacancy("v2", stage_note="first line\nsecond line\nthird", vault=vault)
+
+    entries = _edit_entries(vault)
+    assert len(entries) == 1
+    assert (
+        entries[0] == f"- {_today()}: stage_note: (none) -> first line [+2 more lines]"
+    )
+
+
+def test_a_value_shaped_like_a_history_entry_does_not_forge_one(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+
+    core.edit_vacancy(
+        "v2", stage_note="real note\n- 2020-01-01: role: forged -> forged", vault=vault
+    )
+
+    entries = _edit_entries(vault)
+    assert len(entries) == 1
+    assert "forged" not in entries[0]
+
+
+def test_edit_preserves_prior_edit_history_entries(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+
+    core.edit_vacancy("v2", recruiter="Anna K.", vault=vault)
+    core.edit_vacancy("v2", salary_note="120k", vault=vault)
+
+    entries = _edit_entries(vault)
+    assert [entry.split(": ")[1] for entry in entries] == ["recruiter", "salary_note"]
+
+
+def test_first_edit_creates_the_block_preserving_preceding_body(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    vacancy_path = vault / "tiny-corp" / "v2" / "vacancy.md"
+    _, body_before = frontmatter.parse(vacancy_path.read_text(encoding="utf-8"))
+    assert core.EDIT_HISTORY_HEADING not in body_before
+
+    core.edit_vacancy("v2", recruiter="Anna K.", vault=vault)
+
+    _, body_after = frontmatter.parse(vacancy_path.read_text(encoding="utf-8"))
+    assert body_after.startswith(body_before)
+    assert core.EDIT_HISTORY_HEADING in body_after
+
+
+def test_a_no_op_edit_creates_no_edit_history_block(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, recruiter="Anna K.")
+    vacancy_path = vault / "tiny-corp" / "v2" / "vacancy.md"
+    before = vacancy_path.read_bytes()
+
+    core.edit_vacancy("v2", recruiter="Anna K.", vault=vault)
+
+    assert vacancy_path.read_bytes() == before
+    assert core.EDIT_HISTORY_HEADING not in vacancy_path.read_text(encoding="utf-8")
+
+
+# --- Section 7 (edit-vacancy-fields): edit_vacancy() ------------------------
+
+
+def test_edit_vacancy_sets_each_editable_field(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    edits: dict[str, object] = {
+        "source_url": "https://new.example/careers/1",
+        "role": "Staff Engineer",
+        "stage_note": "Waiting on the recruiter.",
+        "salary_note": "120-140k",
+        "recruiter": "Anna K.",
+        "external_id": "ext-42",
+        "tags": ["remote", "python"],
+        "found_date": date(2026, 1, 2),
+        "applied_date": date(2026, 1, 4),
+    }
+
+    for field, value in edits.items():
+        result = core.edit_vacancy("v2", vault=vault, **{field: value})
+        assert result.changed is True, field
+        assert result.changed_fields == (field,)
+
+    updated = read_vault(vault).vacancies["v2"]
+    for field, value in edits.items():
+        assert getattr(updated, field) == value
+
+
+def test_edit_vacancy_rejects_uneditable_fields_as_keyword_arguments(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    vacancy_path = vault / "tiny-corp" / "v2" / "vacancy.md"
+    before = vacancy_path.read_bytes()
+
+    for field, value in (
+        ("status", Status.OFFER),
+        ("company", "Other Corp"),
+        ("company_slug", "other-corp"),
+        ("id", "v99"),
+    ):
+        with pytest.raises(TypeError):
+            core.edit_vacancy("v2", vault=vault, **{field: value})
+
+    assert vacancy_path.read_bytes() == before
+
+
+def test_edit_vacancy_leaves_omitted_fields_untouched(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, recruiter="Anna K.", salary_note="120k")
+
+    core.edit_vacancy("v2", source_url="https://new.example/careers/1", vault=vault)
+
+    updated = read_vault(vault).vacancies["v2"]
+    assert updated.recruiter == "Anna K."
+    assert updated.salary_note == "120k"
+    assert updated.source_url == "https://new.example/careers/1"
+
+
+def test_edit_vacancy_clears_a_nullable_field_given_as_none(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, recruiter="Anna K.")
+
+    core.edit_vacancy("v2", recruiter=None, vault=vault)
+
+    metadata, _ = frontmatter.parse(
+        (vault / "tiny-corp" / "v2" / "vacancy.md").read_text(encoding="utf-8")
+    )
+    assert "recruiter" not in metadata
+    assert read_vault(vault).vacancies["v2"].recruiter is None
+
+
+def test_edit_vacancy_unset_is_distinguishable_from_none(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, recruiter="Anna K.")
+
+    omitted = core.edit_vacancy("v2", vault=vault)
+    assert omitted.changed is False
+    assert read_vault(vault).vacancies["v2"].recruiter == "Anna K."
+
+    cleared = core.edit_vacancy("v2", recruiter=None, vault=vault)
+    assert cleared.changed is True
+    assert read_vault(vault).vacancies["v2"].recruiter is None
+
+
+def test_edit_vacancy_applies_several_fields_in_one_call(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+
+    result = core.edit_vacancy(
+        "v2",
+        source_url="https://new.example/careers/1",
+        recruiter="Anna K.",
+        tags=["remote"],
+        vault=vault,
+    )
+
+    assert set(result.changed_fields) == {"source_url", "recruiter", "tags"}
+    updated = read_vault(vault).vacancies["v2"]
+    assert updated.source_url == "https://new.example/careers/1"
+    assert updated.recruiter == "Anna K."
+    assert updated.tags == ["remote"]
+    assert [entry.split(": ")[1] for entry in _edit_entries(vault)] == [
+        "source_url",
+        "recruiter",
+        "tags",
+    ]
+
+
+def test_edit_vacancy_writes_nothing_when_one_field_is_invalid(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    vacancy_path = vault / "tiny-corp" / "v2" / "vacancy.md"
+    before = vacancy_path.read_bytes()
+
+    with pytest.raises(core.InvalidVacancyDataError):
+        core.edit_vacancy(
+            "v2", recruiter="Anna K.", source_url="ftp://example.com/x", vault=vault
+        )
+
+    assert vacancy_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("edit", "expected_in_message"),
+    [
+        ({"source_url": "ftp://example.com/x"}, "source_url"),
+        ({"role": "   "}, "role"),
+        ({"applied_date": None}, "applied_date"),
+        ({"found_date": date(2026, 1, 4)}, "found_date"),
+        ({"found_date": _tomorrow()}, "found_date"),
+    ],
+)
+def test_edit_vacancy_rejects_invalid_data(
+    tmp_path: Path, edit: dict[str, object], expected_in_message: str
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    vacancy_path = vault / "tiny-corp" / "v2" / "vacancy.md"
+    before = vacancy_path.read_bytes()
+
+    with pytest.raises(core.InvalidVacancyDataError) as exc_info:
+        core.edit_vacancy("v2", vault=vault, **edit)
+
+    assert expected_in_message in str(exc_info.value)
+    assert vacancy_path.read_bytes() == before
+
+
+def test_edit_vacancy_result_names_only_the_fields_that_changed(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, recruiter="Anna K.")
+
+    result = core.edit_vacancy(
+        "v2",
+        recruiter="Anna K.",
+        source_url="https://new.example/careers/1",
+        vault=vault,
+    )
+
+    assert result.changed is True
+    assert result.changed_fields == ("source_url",)
+    (change,) = result.changes
+    assert change.old == "https://jobs.acme.example/v2"
+    assert change.new == "https://new.example/careers/1"
+
+
+def test_edit_vacancy_with_no_fields_is_a_no_op(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    vacancy_path = vault / "tiny-corp" / "v2" / "vacancy.md"
+    before = vacancy_path.read_bytes()
+
+    result = core.edit_vacancy("v2", vault=vault)
+
+    assert result.changed is False
+    assert result.changes == ()
+    assert vacancy_path.read_bytes() == before
+
+
+def test_edit_vacancy_reapplying_the_same_values_is_a_no_op(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    vacancy_path = vault / "tiny-corp" / "v2" / "vacancy.md"
+
+    core.edit_vacancy("v2", recruiter="Anna K.", vault=vault)
+    after_first = vacancy_path.read_bytes()
+    result = core.edit_vacancy("v2", recruiter="Anna K.", vault=vault)
+
+    assert result.changed is False
+    assert vacancy_path.read_bytes() == after_first
+
+
+def test_edit_vacancy_empty_tags_equals_an_absent_tags_field(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    vacancy_path = vault / "tiny-corp" / "v2" / "vacancy.md"
+    before = vacancy_path.read_bytes()
+
+    result = core.edit_vacancy("v2", tags=[], vault=vault)
+
+    assert result.changed is False
+    assert vacancy_path.read_bytes() == before
+
+
+def test_edit_vacancy_no_op_does_not_reindex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    calls: list[object] = []
+    monkeypatch.setattr(core, "reindex", lambda **kwargs: calls.append(kwargs))
+
+    core.edit_vacancy("v2", vault=vault)
+    core.edit_vacancy("v2", recruiter=None, vault=vault)
+
+    assert calls == []
+
+
+def test_edit_vacancy_unknown_id_raises_without_writing(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    before = _snapshot_files(vault)
+
+    with pytest.raises(core.EntityNotFoundError):
+        core.edit_vacancy("no-such-vacancy", recruiter="Anna K.", vault=vault)
+
+    assert _snapshot_files(vault) == before
+
+
+def test_edit_vacancy_preserves_every_untouched_line(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    vacancy_dir = _applied_vacancy(vault, recruiter="Anna K.")
+    vacancy_path = vacancy_dir / "vacancy.md"
+    text = vacancy_path.read_text(encoding="utf-8")
+    metadata, _body = frontmatter.parse(text)
+    vacancy_path.write_text(
+        frontmatter.serialize(metadata, "# Engineer\n\nHand-written prose.\n"),
+        encoding="utf-8",
+    )
+    before = vacancy_path.read_text(encoding="utf-8").split("\n")
+
+    core.edit_vacancy("v2", recruiter="Bob", vault=vault)
+
+    after = vacancy_path.read_text(encoding="utf-8").split("\n")
+    changed = [line for line in after if line not in before]
+    assert all(
+        line.startswith(("recruiter:", "- ")) or line == core.EDIT_HISTORY_HEADING
+        for line in changed
+    ), changed
+    assert "Hand-written prose." in after
+
+
+def test_edit_vacancy_does_not_rewrite_the_role_heading(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+
+    core.edit_vacancy("v2", role="Staff Engineer", vault=vault)
+
+    _, body = frontmatter.parse(
+        (vault / "tiny-corp" / "v2" / "vacancy.md").read_text(encoding="utf-8")
+    )
+    assert body.startswith("# Engineer\n")
+    assert read_vault(vault).vacancies["v2"].role == "Staff Engineer"
+
+
+def test_edit_vacancy_leaves_id_directory_and_status_alone(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, status=Status.SCREENING)
+    vacancy_path = vault / "tiny-corp" / "v2" / "vacancy.md"
+
+    core.edit_vacancy(
+        "v2", found_date=date(2026, 1, 2), role="Staff Engineer", vault=vault
+    )
+
+    assert vacancy_path.exists()
+    updated = read_vault(vault).vacancies["v2"]
+    assert updated.id == "v2"
+    assert updated.status == Status.SCREENING
+    assert updated.found_date == date(2026, 1, 2)
+
+
+def test_edited_role_is_searchable_without_a_separate_reindex(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, role=UNKNOWN_ROLE)
+    build_index(read_vault(vault), default_index_path(vault))
+
+    core.edit_vacancy("v2", role="Zebra Migration Specialist", vault=vault)
+
+    results = core.search("Zebra Migration", vault=vault, mode=SearchMode.KEYWORD)
+    assert any(hit.vacancy_id == "v2" for hit in results.hits)
+
+
+def test_edited_field_is_visible_to_get_vacancy_immediately(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    build_index(read_vault(vault), default_index_path(vault))
+
+    core.edit_vacancy("v2", source_url="https://new.example/careers/1", vault=vault)
+
+    assert core.get_vacancy("v2", vault=vault).source_url == (
+        "https://new.example/careers/1"
+    )
+
+
+# --- Section 7 (edit-vacancy-fields): resolve_field_edits() -----------------
+
+
+def test_resolve_field_edits_drops_ungiven_values_and_maps_clears() -> None:
+    resolved = core.resolve_field_edits(
+        {"recruiter": "Anna K.", "salary_note": None}, ["source-url"]
+    )
+
+    assert resolved == {"recruiter": "Anna K.", "source_url": None}
+
+
+def test_resolve_field_edits_rejects_an_uneditable_field_name() -> None:
+    for field in ("status", "company", "id", "not_a_field"):
+        with pytest.raises(core.UneditableFieldError) as exc_info:
+            core.resolve_field_edits({}, [field])
+        message = str(exc_info.value)
+        assert field in message
+        for editable in core.EDITABLE_FIELDS:
+            assert editable in message
+
+
+def test_resolve_field_edits_rejects_clearing_a_non_nullable_field() -> None:
+    for field in ("role", "found_date", "tags"):
+        with pytest.raises(core.NotNullableFieldError) as exc_info:
+            core.resolve_field_edits({}, [field])
+        assert field in str(exc_info.value)
+
+
+def test_resolve_field_edits_rejects_setting_and_clearing_one_field() -> None:
+    with pytest.raises(core.ConflictingEditError) as exc_info:
+        core.resolve_field_edits({"recruiter": "Anna K."}, ["recruiter"])
+
+    assert "recruiter" in str(exc_info.value)
+
+
+# --- Section 8 (resolve-write-target-vacancy): resolve_vacancy() ------------
+
+
+def _one_vacancy_company(vault: Path) -> Path:
+    _init_vault(vault)
+    _write_company(vault, "tiny-corp", "Tiny Corp")
+    _write_vacancy(vault, "tiny-corp", "v1", _simple_vacancy("v1", slug="tiny-corp"))
+    return vault
+
+
+def test_resolve_vacancy_exact_id_returns_that_id(tmp_path: Path) -> None:
+    vault = _one_vacancy_company(tmp_path / "vault")
+
+    assert core.resolve_vacancy("v1", vault=vault) == "v1"
+
+
+def test_resolve_vacancy_exact_company_slug_returns_its_only_vacancy(
+    tmp_path: Path,
+) -> None:
+    vault = _one_vacancy_company(tmp_path / "vault")
+
+    assert core.resolve_vacancy("tiny-corp", vault=vault) == "v1"
+
+
+def test_resolve_vacancy_company_display_name_returns_its_only_vacancy(
+    tmp_path: Path,
+) -> None:
+    vault = _one_vacancy_company(tmp_path / "vault")
+
+    assert core.resolve_vacancy("TINY CORP", vault=vault) == "v1"
+
+
+def test_resolve_vacancy_fuzzy_company_name_returns_its_only_vacancy(
+    tmp_path: Path,
+) -> None:
+    vault = _one_vacancy_company(tmp_path / "vault")
+
+    assert core.resolve_vacancy("Tiny", vault=vault) == "v1"
+
+
+def test_resolve_vacancy_exact_id_short_circuits_the_company_tiers(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "wondercorp", "Wonder Co")
+    _write_company(vault, "other-corp", "Other Corp")
+    _write_vacancy(
+        vault, "other-corp", "v1", _simple_vacancy("Wonder Co", slug="other-corp")
+    )
+    _write_vacancy(vault, "wondercorp", "v2", _simple_vacancy("v2", slug="wondercorp"))
+
+    assert core.resolve_vacancy("Wonder Co", vault=vault) == "Wonder Co"
+
+
+def test_resolve_vacancy_company_with_several_vacancies_raises_naming_both(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "tiny-corp", "Tiny Corp")
+    _write_vacancy(vault, "tiny-corp", "v1", _simple_vacancy("v1", slug="tiny-corp"))
+    _write_vacancy(vault, "tiny-corp", "v2", _simple_vacancy("v2", slug="tiny-corp"))
+
+    with pytest.raises(core.AmbiguousVacancyError) as exc_info:
+        core.resolve_vacancy("Tiny Corp", vault=vault)
+
+    assert set(exc_info.value.vacancy_ids) == {"v1", "v2"}
+    assert exc_info.value.company_slug == "tiny-corp"
+    message = str(exc_info.value)
+    assert "v1" in message
+    assert "v2" in message
+
+
+def test_resolve_vacancy_company_with_no_vacancies_raises(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "tiny-corp", "Tiny Corp")
+
+    with pytest.raises(core.EntityNotFoundError):
+        core.resolve_vacancy("Tiny Corp", vault=vault)
+
+
+def test_resolve_vacancy_ambiguous_company_query_raises_before_narrowing(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    _write_company(vault, "widget-us", "Widget Inc")
+    _write_company(vault, "widget-eu", "Widget Inc")
+    _write_vacancy(vault, "widget-us", "v1", _simple_vacancy("v1", slug="widget-us"))
+
+    with pytest.raises(core.AmbiguousEntityError) as exc_info:
+        core.resolve_vacancy("widget inc", vault=vault)
+
+    assert {c.slug for c in exc_info.value.candidates} == {"widget-us", "widget-eu"}
+
+
+def test_resolve_vacancy_no_match_raises(tmp_path: Path) -> None:
+    vault = _one_vacancy_company(tmp_path / "vault")
+
+    with pytest.raises(core.EntityNotFoundError):
+        core.resolve_vacancy("zzz-nonexistent-zzz", vault=vault)
+
+
+def test_resolve_still_returns_a_company_for_a_one_vacancy_company(
+    tmp_path: Path,
+) -> None:
+    vault = _one_vacancy_company(tmp_path / "vault")
+
+    resolution = core.resolve("Tiny Corp", vault=vault)
+
+    assert resolution.company_slug == "tiny-corp"
+    assert resolution.vacancy_id is None
+
+
+def test_resolve_vacancy_modifies_no_file(tmp_path: Path) -> None:
+    vault = _one_vacancy_company(tmp_path / "vault")
+    before = _snapshot_files(vault)
+
+    core.resolve_vacancy("Tiny Corp", vault=vault)
+    with pytest.raises(core.EntityNotFoundError):
+        core.resolve_vacancy("zzz-nonexistent-zzz", vault=vault)
+
+    assert _snapshot_files(vault) == before
