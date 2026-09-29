@@ -35,9 +35,12 @@ this module never resolves or caches an `IndexHandle` of its own.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import functools
+import inspect
 import sys
-from collections.abc import Awaitable, Callable
+import threading
+from collections.abc import Callable
 from dataclasses import fields, is_dataclass
 from datetime import date
 from importlib import resources
@@ -199,7 +202,17 @@ def _to_jsonable(value: object) -> JSONValue:
     return value  # type: ignore[return-value] - already a JSONValue leaf (str/int/float/bool/None)
 
 
-def _delegate[F: Callable[..., Awaitable[Any]]](fn: F) -> F:
+_CORE_LOCK = threading.Lock()
+"""Serializes tool bodies: they run in worker threads, and the vault
+and the LanceDB index are not safe for concurrent writers."""
+
+
+def _locked_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+    with _CORE_LOCK:
+        return fn(*args, **kwargs)
+
+
+def _delegate[F: Callable[..., Any]](fn: F) -> F:
     """Wrap one tool handler: run it, convert its result via
     `_to_jsonable`, and turn any typed `core.py`/`config.py`/
     `index.search` error into a `ToolError` naming the error's own type
@@ -207,12 +220,21 @@ def _delegate[F: Callable[..., Awaitable[Any]]](fn: F) -> F:
     converts a `ToolError` into a tool result with `isError=true`,
     never a JSON-RPC protocol error, so nothing here constructs a
     `CallToolResult` directly. Applied to
-    every tool function; no tool duplicates this try/except itself."""
+    every tool function; no tool duplicates this try/except itself.
+
+    Tool bodies are plain sync functions calling blocking `core.py`
+    code (file IO, reindex, embedding-model load); they run via
+    `asyncio.to_thread` so they never stall the event loop - blocking
+    it made the server unresponsive and clients time out after every
+    write/reindex. Coroutine functions are still awaited directly."""
 
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         try:
-            result = await fn(*args, **kwargs)
+            if inspect.iscoroutinefunction(fn):
+                result = await fn(*args, **kwargs)
+            else:
+                result = await asyncio.to_thread(_locked_call, fn, *args, **kwargs)
         except _TYPED_ERRORS as exc:
             message = f"{type(exc).__name__}: {exc}"
             raise ToolError(message) from exc
@@ -289,7 +311,7 @@ def build_server(vault_path: Path) -> FastMCP:
 def _register_read_tools(server: FastMCP, vault_path: Path) -> None:
     @server.tool(annotations=_READ_ONLY, app=_ui_app("list_vacancies"))
     @_delegate
-    async def list_vacancies(  # noqa: PLR0913, PLR0917 - mirrors core.list_vacancies's own signature
+    def list_vacancies(  # noqa: PLR0913, PLR0917 - mirrors core.list_vacancies's own signature
         status: list[Status] | None = None,
         company: str | None = None,
         since: date | None = None,
@@ -314,7 +336,7 @@ def _register_read_tools(server: FastMCP, vault_path: Path) -> None:
 
     @server.tool(annotations=_READ_ONLY, app=_ui_app("get_company"))
     @_delegate
-    async def get_company(name: str) -> core.CompanyDossier:
+    def get_company(name: str) -> core.CompanyDossier:
         """Get one company's dossier: display name, domains,
         recruiters, notes (from _company.md when present), and every
         vacancy at that company as a compact summary with document
@@ -325,7 +347,7 @@ def _register_read_tools(server: FastMCP, vault_path: Path) -> None:
 
     @server.tool(annotations=_READ_ONLY, app=_ui_app("get_vacancy"))
     @_delegate
-    async def get_vacancy(id_or_query: str) -> core.VacancyDetail:
+    def get_vacancy(id_or_query: str) -> core.VacancyDetail:
         """Get one vacancy's full record: role, status, dates,
         recruiter, stage_note, tags, and its documents as a list of
         paths and titles - never document bodies. Use read_document to
@@ -335,7 +357,7 @@ def _register_read_tools(server: FastMCP, vault_path: Path) -> None:
 
     @server.tool(annotations=_READ_ONLY, app=_ui_app("search"))
     @_delegate
-    async def search(  # noqa: PLR0913, PLR0917 - mirrors core.search's own signature
+    def search(  # noqa: PLR0913, PLR0917 - mirrors core.search's own signature
         query: str,
         mode: SearchMode | None = None,
         company: str | None = None,
@@ -368,7 +390,7 @@ def _register_read_tools(server: FastMCP, vault_path: Path) -> None:
 
     @server.tool(annotations=_READ_ONLY)
     @_delegate
-    async def read_document(path: str) -> core.DocumentContent:
+    def read_document(path: str) -> core.DocumentContent:
         """Read one vault document's full text by path (absolute or
         vault-relative, as returned by list_vacancies/get_vacancy/
         get_company/search). Rejects any path resolving outside the
@@ -377,7 +399,7 @@ def _register_read_tools(server: FastMCP, vault_path: Path) -> None:
 
     @server.tool(annotations=_READ_ONLY)
     @_delegate
-    async def resolve(query: str) -> core.Resolution:
+    def resolve(query: str) -> core.Resolution:
         """Resolve a query to a vacancy id or a company slug: exact
         vacancy id, then exact company slug, then a unique company-name
         match (case-insensitive, then fuzzy). Never guesses - an
@@ -387,7 +409,7 @@ def _register_read_tools(server: FastMCP, vault_path: Path) -> None:
 
     @server.tool(annotations=_READ_ONLY)
     @_delegate
-    async def find_existing(
+    def find_existing(
         company: str, source_url: str | None = None
     ) -> list[core.VacancySummary]:
         """Check for a vacancy that might already exist before calling
@@ -409,7 +431,7 @@ def _register_read_tools(server: FastMCP, vault_path: Path) -> None:
 def _register_write_tools(server: FastMCP, vault_path: Path) -> None:
     @server.tool(annotations=_WRITE)
     @_delegate
-    async def append_note(vacancy_id: str, text: str, date: date | None = None) -> str:
+    def append_note(vacancy_id: str, text: str, date: date | None = None) -> str:
         """Append a dated note to a vacancy's documents. date defaults
         to today. Never overwrites an existing note - a second note the
         same day gets its own file."""
@@ -417,7 +439,7 @@ def _register_write_tools(server: FastMCP, vault_path: Path) -> None:
 
     @server.tool(annotations=_WRITE)
     @_delegate
-    async def set_status(
+    def set_status(
         vacancy_id: str,
         new_status: Status,
         note: str | None = None,
@@ -441,7 +463,7 @@ def _register_write_tools(server: FastMCP, vault_path: Path) -> None:
 
     @server.tool(annotations=_WRITE)
     @_delegate
-    async def edit_vacancy(  # noqa: PLR0913, PLR0917 - mirrors core.edit_vacancy's own signature
+    def edit_vacancy(  # noqa: PLR0913, PLR0917 - mirrors core.edit_vacancy's own signature
         vacancy_id: str,
         source_url: str | None = None,
         role: str | None = None,
@@ -486,7 +508,7 @@ def _register_write_tools(server: FastMCP, vault_path: Path) -> None:
 
     @server.tool(annotations=_WRITE)
     @_delegate
-    async def add_document(  # noqa: PLR0913, PLR0917 - mirrors core.add_document's own signature
+    def add_document(  # noqa: PLR0913, PLR0917 - mirrors core.add_document's own signature
         vacancy_id: str,
         kind: DocumentKind,
         content: str,
@@ -509,7 +531,7 @@ def _register_write_tools(server: FastMCP, vault_path: Path) -> None:
 
     @server.tool(annotations=_WRITE)
     @_delegate
-    async def create_vacancy(  # noqa: PLR0913, PLR0917 - mirrors core.create_vacancy's own signature
+    def create_vacancy(  # noqa: PLR0913, PLR0917 - mirrors core.create_vacancy's own signature
         company: str,
         role: str,
         found_date: date,
