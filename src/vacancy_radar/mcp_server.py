@@ -4,7 +4,11 @@ Invariant 4 (`core.py`'s own module docstring: "shared by the CLI and,
 later, the MCP server (stage 8)"): every tool here is argument
 marshalling around exactly one `core.py` call, never new business
 logic. If a tool needs behavior `core.py` doesn't provide, that's a
-`core.py` change proposed separately - never inline here.
+`core.py` change proposed separately - never inline here. The MCP Apps
+`ui://` views are not an exception: they are static `.html`/`.css`/`.js`
+files under `assets/mcp_ui/`, concatenated once at import and served
+verbatim, and a client that does not negotiate the extension gets the
+tool's ordinary text result unchanged.
 
 Invariant 5: nothing is written to stdout except JSON-RPC frames.
 Diagnostics (startup failures, warnings) go to stderr - `sys.stderr`
@@ -18,7 +22,7 @@ Vault-path resolution: `--vault` > `VAULT_PATH`, via
 roots (a client-supplied workspace-folder capability) are deliberately
 not used: the installed MCP Python SDK's default protocol revision
 (2026-07-28, SEP-2577) deprecates the entire roots capability, and the
-high-level `MCPServer` class this module builds on exposes no
+high-level `FastMCP` class this module builds on exposes no
 supported hook for `notifications/roots/list_changed` at all. The
 resolved vault path is fixed for the life of the process and closed
 over by every tool/resource/prompt function `build_server` registers -
@@ -36,12 +40,20 @@ import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import fields, is_dataclass
 from datetime import date
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
-from mcp.server.mcpserver.exceptions import ToolError
-from mcp_types import ToolAnnotations
+from fastmcp import FastMCP
+from fastmcp.apps import (
+    UI_MIME_TYPE,
+    AppConfig,
+    ResourceCSP,
+    app_config_to_meta_dict,
+)
+from fastmcp.exceptions import ToolError
+from fastmcp.resources import TextResource
+from mcp.types import ToolAnnotations
 from pydantic import BaseModel
 
 import vacancy_radar
@@ -71,6 +83,77 @@ _WRITE = ToolAnnotations(
 )
 """Fixed annotation objects, applied verbatim to every read/write tool
 (spec `mcp-read-tools`/`mcp-write-tools`) - never computed per tool."""
+
+
+# --- MCP Apps: the `ui://` views ---------------------------------------
+#
+# Presentation only, and static: the views are plain .html/.css/.js files
+# under `assets/mcp_ui/`, assembled once at import into whole documents and
+# served verbatim. Nothing here reads the vault or reshapes a result, so
+# Invariant 4 holds - the server ships an asset, it does not render one.
+# A client that does not negotiate the Apps extension never asks for these
+# and sees exactly the text it always has.
+
+VIEW_URIS: dict[str, str] = {
+    "list_vacancies": "ui://vacancy-radar/vacancy-list",
+    "get_vacancy": "ui://vacancy-radar/vacancy-detail",
+    "get_company": "ui://vacancy-radar/company-dossier",
+    "search": "ui://vacancy-radar/search-results",
+}
+"""Tool name -> `ui://` view URI. Exactly the read tools that get a
+`_meta.ui` reference; every other tool gets none."""
+
+_VIEW_TITLES: dict[str, str] = {
+    "list_vacancies": "Vacancies",
+    "get_vacancy": "Vacancy",
+    "get_company": "Company",
+    "search": "Search results",
+}
+
+_ASSETS = resources.files(vacancy_radar) / "assets" / "mcp_ui"
+
+
+def _asset(name: str) -> str:
+    """One view asset's text, read from the installed package."""
+    return (_ASSETS / name).read_text(encoding="utf-8")
+
+
+RENDER_JS: dict[str, str] = {
+    tool: _asset(f"{uri.rsplit('/', 1)[-1]}.js") for tool, uri in VIEW_URIS.items()
+}
+"""Tool name -> its view's render-function source, exposed so a test can
+check which result fields a view reads without parsing the whole page."""
+
+
+def _build_pages() -> dict[str, tuple[str, str]]:
+    """`ui://` URI -> `(title, html)` for every view: the shared shell,
+    stylesheet, DOM helpers, and host bridge, plus the view's own render
+    function. A pure concatenation of static fragments - no vault data
+    reaches it."""
+    shell, css = _asset("page.html"), _asset("view.css")
+    helpers, bridge = _asset("helpers.js"), _asset("bridge.js")
+    return {
+        uri: (
+            _VIEW_TITLES[tool],
+            shell.replace("__TITLE__", _VIEW_TITLES[tool])
+            .replace("__STYLE__", css)
+            .replace("__SCRIPT__", "\n".join((helpers, RENDER_JS[tool], bridge))),
+        )
+        for tool, uri in VIEW_URIS.items()
+    }
+
+
+PAGES: dict[str, tuple[str, str]] = _build_pages()
+"""Every view document, assembled once at import."""
+
+
+def _ui_app(tool_name: str) -> AppConfig:
+    """The `AppConfig` binding `tool_name` to the `ui://` view a
+    UI-capable host renders for it (spec `mcp-apps-ui`); FastMCP
+    stamps it as `_meta.ui.resourceUri`. The tool's own result is
+    unchanged; a client that did not negotiate the Apps extension
+    ignores this. Only the four tools in `VIEW_URIS` get one."""
+    return AppConfig(resource_uri=VIEW_URIS[tool_name])
 
 
 # --- Shared helpers: serialization and typed-error wrapping ----------------
@@ -120,10 +203,10 @@ def _delegate[F: Callable[..., Awaitable[Any]]](fn: F) -> F:
     """Wrap one tool handler: run it, convert its result via
     `_to_jsonable`, and turn any typed `core.py`/`config.py`/
     `index.search` error into a `ToolError` naming the error's own type
-    (design.md decision 9) - `MCPServer`'s own `_handle_call_tool`
-    already converts any plain `Exception` (`ToolError` included) into
-    a tool result with `isError=true`, never a JSON-RPC protocol error,
-    so nothing here constructs a `CallToolResult` directly. Applied to
+    (design.md decision 9) - FastMCP's own tool-call handling already
+    converts a `ToolError` into a tool result with `isError=true`,
+    never a JSON-RPC protocol error, so nothing here constructs a
+    `CallToolResult` directly. Applied to
     every tool function; no tool duplicates this try/except itself."""
 
     @functools.wraps(fn)
@@ -141,7 +224,33 @@ def _delegate[F: Callable[..., Awaitable[Any]]](fn: F) -> F:
 # --- Server construction -----------------------------------------------
 
 
-def build_server(vault_path: Path) -> MCPServer:
+_LOCKED_CSP = ResourceCSP(connect_domains=[], resource_domains=[], frame_domains=[])
+"""A Content-Security-Policy permitting no external domain at all -
+applied to every `ui://` view (spec `mcp-apps-ui`)."""
+
+
+def _register_views(server: FastMCP) -> None:
+    """Register every `ui://` view from `PAGES` as a self-contained
+    HTML resource under the MCP Apps mime type, with a
+    Content-Security-Policy that permits no external domain (spec
+    `mcp-apps-ui`). FastMCP advertises `io.modelcontextprotocol/ui`
+    for these; a client that did not negotiate it never asks for them
+    and falls back to the tool's own text result.
+    """
+    for uri, (title, html) in PAGES.items():
+        server.add_resource(
+            TextResource(
+                uri=uri,
+                name=uri,
+                title=title,
+                mime_type=UI_MIME_TYPE,
+                meta={"ui": app_config_to_meta_dict(AppConfig(csp=_LOCKED_CSP))},
+                text=html,
+            )
+        )
+
+
+def build_server(vault_path: Path) -> FastMCP:
     """Build the MCP server for `vault_path`, fixed for the life of the
     returned server (design.md decisions 7-8). Every tool, resource,
     and prompt function defined here closes over `vault_path` and
@@ -149,7 +258,7 @@ def build_server(vault_path: Path) -> MCPServer:
     argument - no tool resolves or caches its own vault path or index
     handle.
     """
-    server: MCPServer = MCPServer(
+    server: FastMCP = FastMCP(
         name="vacancy-radar",
         version=vacancy_radar.__version__,
         instructions=(
@@ -165,6 +274,7 @@ def build_server(vault_path: Path) -> MCPServer:
         ),
     )
 
+    _register_views(server)
     _register_read_tools(server, vault_path)
     _register_write_tools(server, vault_path)
     _register_resources(server, vault_path)
@@ -176,8 +286,8 @@ def build_server(vault_path: Path) -> MCPServer:
 # --- Read tools ----------------------------------------------------------
 
 
-def _register_read_tools(server: MCPServer, vault_path: Path) -> None:
-    @server.tool(annotations=_READ_ONLY)
+def _register_read_tools(server: FastMCP, vault_path: Path) -> None:
+    @server.tool(annotations=_READ_ONLY, app=_ui_app("list_vacancies"))
     @_delegate
     async def list_vacancies(  # noqa: PLR0913, PLR0917 - mirrors core.list_vacancies's own signature
         status: list[Status] | None = None,
@@ -202,7 +312,7 @@ def _register_read_tools(server: MCPServer, vault_path: Path) -> None:
             vault=vault_path,
         )
 
-    @server.tool(annotations=_READ_ONLY)
+    @server.tool(annotations=_READ_ONLY, app=_ui_app("get_company"))
     @_delegate
     async def get_company(name: str) -> core.CompanyDossier:
         """Get one company's dossier: display name, domains,
@@ -213,7 +323,7 @@ def _register_read_tools(server: MCPServer, vault_path: Path) -> None:
         unresolved name returns a typed error rather than guessing."""
         return core.get_company(name, vault=vault_path)
 
-    @server.tool(annotations=_READ_ONLY)
+    @server.tool(annotations=_READ_ONLY, app=_ui_app("get_vacancy"))
     @_delegate
     async def get_vacancy(id_or_query: str) -> core.VacancyDetail:
         """Get one vacancy's full record: role, status, dates,
@@ -223,7 +333,7 @@ def _register_read_tools(server: MCPServer, vault_path: Path) -> None:
         exact vacancy id or a fuzzy match."""
         return core.get_vacancy(id_or_query, vault=vault_path)
 
-    @server.tool(annotations=_READ_ONLY)
+    @server.tool(annotations=_READ_ONLY, app=_ui_app("search"))
     @_delegate
     async def search(  # noqa: PLR0913, PLR0917 - mirrors core.search's own signature
         query: str,
@@ -296,14 +406,14 @@ def _register_read_tools(server: MCPServer, vault_path: Path) -> None:
 # --- Write tools -----------------------------------------------------------
 
 
-def _register_write_tools(server: MCPServer, vault_path: Path) -> None:
+def _register_write_tools(server: FastMCP, vault_path: Path) -> None:
     @server.tool(annotations=_WRITE)
     @_delegate
-    async def append_note(vacancy_id: str, text: str, date: date | None = None) -> Path:
+    async def append_note(vacancy_id: str, text: str, date: date | None = None) -> str:
         """Append a dated note to a vacancy's documents. date defaults
         to today. Never overwrites an existing note - a second note the
         same day gets its own file."""
-        return core.append_note(vacancy_id, text, date=date, vault=vault_path)
+        return str(core.append_note(vacancy_id, text, date=date, vault=vault_path))
 
     @server.tool(annotations=_WRITE)
     @_delegate
@@ -383,7 +493,7 @@ def _register_write_tools(server: MCPServer, vault_path: Path) -> None:
         title: str,
         date: date,
         external_id: str | None = None,
-    ) -> Path:
+    ) -> str:
         """File a document (posting, email, note, or take-home) under a
         vacancy. The filename is always derived from date/kind/title -
         there is no way to choose a filename or write path directly, so
@@ -391,8 +501,10 @@ def _register_write_tools(server: MCPServer, vault_path: Path) -> None:
         from an untrusted source such as a forwarded recruiter email.
         Passing external_id makes re-filing the same source (e.g. the
         same email thread) a no-op instead of a duplicate."""
-        return core.add_document(
-            vacancy_id, kind, content, title, date, external_id, vault=vault_path
+        return str(
+            core.add_document(
+                vacancy_id, kind, content, title, date, external_id, vault=vault_path
+            )
         )
 
     @server.tool(annotations=_WRITE)
@@ -448,7 +560,7 @@ def _register_write_tools(server: MCPServer, vault_path: Path) -> None:
 # --- Resources ---------------------------------------------------------
 
 
-def _register_resources(server: MCPServer, vault_path: Path) -> None:
+def _register_resources(server: FastMCP, vault_path: Path) -> None:
     @server.resource(
         "vacancy-radar://companies",
         name="companies",
@@ -590,7 +702,7 @@ def _weekly_review_text(vault_path: Path) -> str:
     return "\n\n".join(sections)
 
 
-def _register_prompts(server: MCPServer, vault_path: Path) -> None:
+def _register_prompts(server: FastMCP, vault_path: Path) -> None:
     @server.prompt()
     def prep_interview(company: str) -> str:
         """Interview prep dossier for a company: its vacancies,

@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/), and this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Inline views for the MCP server (MCP Apps).** The server registers
+  the `io.modelcontextprotocol/ui` extension and ships four
+  self-contained `ui://` HTML views, so a host that supports MCP Apps
+  renders `list_vacancies`, `get_vacancy`, `get_company`, and `search`
+  results as a card or table instead of raw JSON. The views make no
+  network request and render only fields already present in the tool's
+  result; there is nothing to configure, and a client that has not
+  negotiated the extension sees the same text output as before.
+
+### Fixed
+
+- opencode printed `unknown format "path" ignored in schema at path
+  "#/properties/result"` on every start. `append_note` and
+  `add_document` returned a `Path`, which FastMCP advertises as the
+  non-standard JSON Schema format `path`; they now return the path as a
+  plain string (same value on the wire).
+- The `mcp-transport` spec's tool-list requirement said "eleven tools"
+  and omitted `edit_vacancy`; corrected to twelve to match the server
+  and its tests.
+
 ## [0.2.0] - 2026-08-11
 
 Vacancies became editable: their fields, not just their status, with

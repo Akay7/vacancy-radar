@@ -28,7 +28,9 @@ These constrain every change, not just the current one:
    edits that record what they changed in the vault. Never delete; never
    overwrite a document, a note, or anything a write did not validate first.
 4. The MCP server contains no logic beyond argument marshalling. Every tool
-   delegates to a shared core module that the CLI also calls.
+   delegates to a shared core module that the CLI also calls. The MCP Apps
+   `ui://` views are static assets, not an exception: the server ships them
+   verbatim and never renders vault data server-side.
 5. Nothing writes to stdout except JSON-RPC. Diagnostics go to stderr.
 
 ## Roadmap

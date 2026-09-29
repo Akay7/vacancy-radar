@@ -450,6 +450,15 @@ take-homes, vacancies tagged `needs_review`). An unresolved or
 ambiguous `company`/`vacancy_id` returns a message saying so - never a
 fabricated dossier.
 
+**Inline views (MCP Apps).** The server registers the
+`io.modelcontextprotocol/ui` extension, so a host that supports it
+renders `list_vacancies`, `get_vacancy`, `get_company`, and `search`
+results as a compact card or table instead of raw JSON. The views are
+static, self-contained HTML with no network access; they render only
+the fields already in the tool's result. Nothing to configure, and a
+client that doesn't support the extension sees exactly the same text
+output as before.
+
 ## Working on the code
 
 From a clone:

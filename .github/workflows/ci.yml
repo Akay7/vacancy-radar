@@ -43,6 +43,20 @@ jobs:
         if: matrix.python-version == '3.12'
         run: uv run pre-commit run --all-files
 
+      # The MCP Apps `ui://` view render tests (tests/test_mcp_ui_views.py)
+      # need headless Chromium. They are interpreter-independent, so one leg
+      # covers them; the other legs skip those tests automatically when the
+      # browser is absent.
+      - name: Cache Playwright browser
+        if: matrix.python-version == '3.12'
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('uv.lock') }}
+      - name: Install Playwright Chromium
+        if: matrix.python-version == '3.12'
+        run: uv run playwright install --with-deps chromium
+
       - name: Test
         run: uv run pytest --cov --cov-report=xml
 

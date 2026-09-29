@@ -1,0 +1,94 @@
+:root {
+  color-scheme: light;
+  --vr-bg: #ffffff;
+  --vr-fg: #1b1b1b;
+  --vr-muted: #6b6b70;
+  --vr-border: #e4e4e7;
+  --vr-chip-bg: #f1f1f3;
+  --vr-chip-fg: #3a3a3d;
+  --vr-accent: #2563eb;
+  --vr-warn: #92400e;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --vr-bg: #1c1c1f;
+  --vr-fg: #ececec;
+  --vr-muted: #a0a0a6;
+  --vr-border: #34343a;
+  --vr-chip-bg: #2c2c31;
+  --vr-chip-fg: #d4d4d8;
+  --vr-accent: #7ba7ff;
+  --vr-warn: #fcd34d;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --vr-bg: #1c1c1f;
+    --vr-fg: #ececec;
+    --vr-muted: #a0a0a6;
+    --vr-border: #34343a;
+    --vr-chip-bg: #2c2c31;
+    --vr-chip-fg: #d4d4d8;
+    --vr-accent: #7ba7ff;
+    --vr-warn: #fcd34d;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--vr-bg);
+  color: var(--vr-fg);
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+h1 { font-size: 15px; margin: 0 0 10px; }
+h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--vr-muted);
+  margin: 16px 0 6px;
+}
+.vr-head { margin-bottom: 12px; }
+.vr-sub { display: flex; gap: 8px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
+.vr-company { color: var(--vr-muted); }
+.vr-chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--vr-chip-bg);
+  color: var(--vr-chip-fg);
+  font-size: 11px;
+}
+.vr-meta { display: grid; gap: 4px; margin: 8px 0; }
+.vr-field { display: flex; gap: 8px; }
+.vr-key { color: var(--vr-muted); min-width: 92px; flex: none; }
+.vr-val { word-break: break-word; }
+.vr-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.vr-row {
+  padding: 7px 0;
+  border-top: 1px solid var(--vr-border);
+}
+.vr-row:first-child { border-top: none; }
+.vr-row-main { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.vr-role { font-weight: 600; }
+.vr-row-meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--vr-muted);
+  font-size: 11px;
+  margin-top: 2px;
+}
+.vr-id { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.vr-snippet { margin: 3px 0 0; color: var(--vr-fg); }
+.vr-empty { color: var(--vr-muted); }
+.vr-warn { color: var(--vr-warn); margin: 4px 0; }
+.vr-error {
+  white-space: pre-wrap;
+  color: var(--vr-warn);
+  font-size: 11px;
+  border-top: 1px solid var(--vr-border);
+  margin-top: 12px;
+  padding-top: 8px;
+}

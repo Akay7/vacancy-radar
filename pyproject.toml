@@ -38,7 +38,7 @@ dependencies = [
     "lancedb>=0.36.0",
     "fastembed>=0.8.0",
     "pypdf>=6.14.2",
-    "mcp>=2.0.0",
+    "fastmcp[apps]>=4.0.0b5",
 ]
 
 [project.urls]
@@ -52,6 +52,10 @@ vacancy-radar-mcp = "vacancy_radar.mcp_server:main"
 
 [dependency-groups]
 dev = [
+    # Headless-Chromium render tests for the MCP Apps `ui://` views
+    # (tests/test_mcp_ui_views.py). Needs `playwright install chromium`
+    # once; the tests skip cleanly when that browser is absent.
+    "playwright>=1.62",
     "pre-commit>=4.0.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
