@@ -6,7 +6,7 @@ validator, why `company_slug` is stored rather than computed, and why
 dates are `date` rather than `datetime`.
 """
 
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from enum import StrEnum
 from urllib.parse import urlparse
 
@@ -141,7 +141,7 @@ class Vacancy(BaseModel):
 
     @model_validator(mode="after")
     def _check_date_coherence(self) -> "Vacancy":
-        if self.found_date > datetime.now(UTC).date():
+        if self.found_date > datetime.now().astimezone().date():
             msg = "found_date must not be in the future"
             raise ValueError(msg)
         if self.applied_date is not None and self.applied_date < self.found_date:

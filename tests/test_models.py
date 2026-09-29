@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -148,7 +148,7 @@ def test_applied_date_before_found_date_is_rejected() -> None:
 
 
 def test_found_date_in_the_future_is_rejected() -> None:
-    tomorrow = datetime.now(UTC).date() + timedelta(days=1)
+    tomorrow = datetime.now().astimezone().date() + timedelta(days=1)
 
     with pytest.raises(ValidationError):
         Vacancy(**minimal_vacancy_data(found_date=tomorrow))
