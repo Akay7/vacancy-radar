@@ -39,7 +39,6 @@ import asyncio
 import functools
 import inspect
 import sys
-import threading
 from collections.abc import Callable
 from dataclasses import fields, is_dataclass
 from datetime import date
@@ -202,16 +201,6 @@ def _to_jsonable(value: object) -> JSONValue:
     return value  # type: ignore[return-value] - already a JSONValue leaf (str/int/float/bool/None)
 
 
-_CORE_LOCK = threading.Lock()
-"""Serializes tool bodies: they run in worker threads, and the vault
-and the LanceDB index are not safe for concurrent writers."""
-
-
-def _locked_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-    with _CORE_LOCK:
-        return fn(*args, **kwargs)
-
-
 def _delegate[F: Callable[..., Any]](fn: F) -> F:
     """Wrap one tool handler: run it, convert its result via
     `_to_jsonable`, and turn any typed `core.py`/`config.py`/
@@ -234,7 +223,7 @@ def _delegate[F: Callable[..., Any]](fn: F) -> F:
             if inspect.iscoroutinefunction(fn):
                 result = await fn(*args, **kwargs)
             else:
-                result = await asyncio.to_thread(_locked_call, fn, *args, **kwargs)
+                result = await asyncio.to_thread(fn, *args, **kwargs)
         except _TYPED_ERRORS as exc:
             message = f"{type(exc).__name__}: {exc}"
             raise ToolError(message) from exc

@@ -171,15 +171,42 @@ def _open_or_create_table(
     schema = build_schema(dim)
     arrow_schema = schema_with_model_metadata(schema, model_name)
     try:
-        table = connection.open_table(TABLE_NAME)
+        table = _open_table(connection)
     except ValueError:
-        return connection.create_table(TABLE_NAME, schema=arrow_schema), True
+        try:
+            return connection.create_table(TABLE_NAME, schema=arrow_schema), True
+        except ValueError:
+            # Another writer's first build created it in between; reopen
+            # (raises again if the ValueError meant something else).
+            table = _open_table(connection)
 
     existing_dim = table.schema.field("vector").type.list_size
     if existing_dim != dim:
         connection.drop_table(TABLE_NAME)
         return connection.create_table(TABLE_NAME, schema=arrow_schema), True
     return table, False
+
+
+_OPEN_WHILE_CREATING_ATTEMPTS = 40
+_OPEN_WHILE_CREATING_DELAY_SECONDS = 0.05
+
+
+def _open_table(connection: "lancedb.DBConnection") -> "Table":
+    """`open_table`, waiting out another writer's first build: while its
+    `create_table` is mid-flight the table directory exists without a
+    committed version, which LanceDB reports as "could not be loaded".
+    Waits about two seconds at most, so a genuinely corrupt table still
+    raises."""
+    for attempt in range(_OPEN_WHILE_CREATING_ATTEMPTS):
+        try:
+            return connection.open_table(TABLE_NAME)
+        except RuntimeError as exc:
+            if "could not be loaded" not in str(exc) or (
+                attempt == _OPEN_WHILE_CREATING_ATTEMPTS - 1
+            ):
+                raise
+            time.sleep(_OPEN_WHILE_CREATING_DELAY_SECONDS)
+    raise AssertionError  # unreachable: the loop returns or raises
 
 
 def _existing_hashes(table: "Table") -> dict[str, str]:

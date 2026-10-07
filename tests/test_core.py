@@ -742,6 +742,9 @@ def test_atomic_write_new_file_failure_leaves_target_absent(
     def _boom(*_args: object, **_kwargs: object) -> None:
         raise OSError(_SIMULATED_REPLACE_FAILURE)
 
+    # A new file is published by hard link, falling back to an exclusive
+    # claim + replace; fail both so the whole publish fails.
+    monkeypatch.setattr(core.os, "link", _boom)
     monkeypatch.setattr(core.os, "replace", _boom)
 
     with pytest.raises(OSError, match=_SIMULATED_REPLACE_FAILURE):
@@ -1853,6 +1856,7 @@ def test_append_note_interrupted_write_leaves_vault_unchanged(
     vault = _minimal_built_vault(tmp_path / "vault")
     before = _snapshot_files(vault)
 
+    monkeypatch.setattr(core.os, "link", _boom)
     monkeypatch.setattr(core.os, "replace", _boom)
 
     with pytest.raises(OSError, match=_SIMULATED_REPLACE_FAILURE):
@@ -1867,6 +1871,7 @@ def test_add_document_interrupted_write_leaves_vault_unchanged(
     vault = _minimal_built_vault(tmp_path / "vault")
     before = _snapshot_files(vault)
 
+    monkeypatch.setattr(core.os, "link", _boom)
     monkeypatch.setattr(core.os, "replace", _boom)
 
     with pytest.raises(OSError, match=_SIMULATED_REPLACE_FAILURE):

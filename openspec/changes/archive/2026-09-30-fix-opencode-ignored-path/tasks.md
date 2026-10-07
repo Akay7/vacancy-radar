@@ -6,4 +6,4 @@
 
 ## 2. Verify
 
-- [ ] 2.1 Run `uv run pytest` and `ruff check`; then restart opencode and confirm the warnings are gone
+- [x] 2.1 Run `uv run pytest` and `ruff check`; then restart opencode and confirm the warnings are gone

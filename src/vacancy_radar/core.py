@@ -19,12 +19,23 @@ status-history block - invariant 3, enforced here in code. See
 filenames (never caller-supplied), `external_id` dedupe, eager
 reindex-on-write, the status graph as data in `models.py`, and the
 atomic-write strategy every write in this module goes through.
+
+Writes take no lock (the lock-free-vault-writes change): they run
+concurrently from MCP worker threads, several server processes, and the
+CLI. New files are published so they can never replace one another,
+`vacancy.md` updates refuse to overwrite a concurrent change, and the
+post-write index refresh retries LanceDB commit conflicts and, if they
+persist, leaves the index stale rather than failing the write.
 """
 
+import contextlib
 import difflib
+import logging
 import os
+import random
 import tempfile
-from collections.abc import Iterable, Mapping
+import time
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -63,6 +74,9 @@ FUZZY_MATCH_CUTOFF = 0.6
 against the fixture vault's company names (see design.md's Open
 Questions): loose enough for "Acme" to reach "Acme Corp", tight enough
 that unrelated company names don't spuriously collide."""
+
+
+logger = logging.getLogger(__name__)
 
 
 class CoreError(Exception):
@@ -796,14 +810,28 @@ def _atomic_write(path: Path, text: str, *, overwrite: bool) -> None:
 
     `overwrite=False` is every new-file write's append-only guard: if
     `path` already exists, this raises `DocumentAlreadyExistsError`
-    without creating a temp file or touching `path`. `overwrite=True`
-    is `set_status`'s sole, explicit exception (`vacancy.md`'s
-    frontmatter update) - it replaces `path`'s content but the write
-    is still atomic.
+    without touching `path`. The guard holds against concurrent writers
+    too (lock-free-vault-writes design.md decision 1): the temp file is
+    published with a hard link, which fails atomically if another
+    writer created `path` first, where `exists()` + `os.replace` would
+    silently clobber it. `overwrite=True` replaces `path`'s content,
+    still atomically.
     """
     if not overwrite and path.exists():
         raise DocumentAlreadyExistsError(path)
 
+    with _temp_file_beside(path, text) as tmp_path:
+        if overwrite:
+            tmp_path.replace(path)
+        else:
+            _publish_new(tmp_path, path)
+
+
+@contextlib.contextmanager
+def _temp_file_beside(path: Path, text: str) -> Iterator[Path]:
+    """A dot-prefixed temp file holding `text` in `path`'s directory
+    (invisible to the vault reader), removed on exit whether or not it
+    was published."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=_TEMP_SUFFIX, dir=path.parent
@@ -812,10 +840,60 @@ def _atomic_write(path: Path, text: str, *, overwrite: bool) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
+        yield tmp_path
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _publish_new(tmp_path: Path, path: Path) -> None:
+    """Make `tmp_path`'s complete content appear at `path`, failing with
+    `DocumentAlreadyExistsError` rather than replacing an existing file."""
+    try:
+        os.link(tmp_path, path)
+    except FileExistsError:
+        raise DocumentAlreadyExistsError(path) from None
+    except OSError:
+        # No hard links on this filesystem (some FUSE, exFAT, network
+        # mounts): claim `path` exclusively, then replace the empty
+        # claim. A reader may briefly see it empty; never clobbered.
+        _publish_new_without_link(tmp_path, path)
+
+
+def _publish_new_without_link(tmp_path: Path, path: Path) -> None:
+    try:
+        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        raise DocumentAlreadyExistsError(path) from None
+    try:
         tmp_path.replace(path)
     except BaseException:
-        tmp_path.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
         raise
+
+
+class ConcurrentModificationError(CoreError):
+    """Raised when a file changed between being read and being
+    rewritten - another writer got there first. Nothing was written;
+    retrying the call re-reads the new content."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(
+            f"{path} was changed by another writer while this update was "
+            "being prepared; nothing was written - retry"
+        )
+
+
+def _replace_if_unchanged(path: Path, expected: str, text: str) -> None:
+    """Atomically replace `path` with `text`, but only if it still holds
+    `expected` (lock-free-vault-writes design.md decision 3). Compares
+    bytes, not mtime, whose resolution varies by filesystem. A change
+    landing between the re-read and the rename is still lost - a
+    two-syscall window, accepted."""
+    with _temp_file_beside(path, text) as tmp_path:
+        if path.read_text(encoding="utf-8") != expected:
+            raise ConcurrentModificationError(path)
+        tmp_path.replace(path)
 
 
 def _ensure_within_vault(vault: Path, path: Path) -> None:
@@ -878,15 +956,78 @@ def reindex(
     stage 3's design.md ("a build must not silently create sidecar
     files on every run"), reachable now via `vacancy-radar reindex
     --extract-sidecars` (see the sidecar-extraction-cli change's
-    design.md decision 1)."""
+    design.md decision 1).
+
+    Concurrent writers share the index without a lock: a LanceDB commit
+    conflict is retried (lock-free-vault-writes design.md decision 4),
+    and one that persists raises here. Write functions refresh through
+    `_refresh_after_write` instead, which logs rather than raises."""
     vault_root = resolve_vault_path(vault)
-    index_path = default_index_path(vault_root)
-    return build_index(
-        read_vault(vault_root),
-        index_path,
-        force=force,
-        extract_sidecars=extract_sidecars,
+    return _reindex_with_retry(
+        vault_root, force=force, extract_sidecars=extract_sidecars
     )
+
+
+_REINDEX_ATTEMPTS = 5
+_REINDEX_BACKOFF_SECONDS = 0.05
+
+
+_LANCE_CONFLICT_MARKERS = (
+    "Retryable commit conflict",  # optimize()/FTS create_index lost a race
+    "Incompatible transaction",  # e.g. an update racing a first build's overwrite
+)
+
+
+def _is_retryable_conflict(exc: BaseException) -> bool:
+    """LanceDB 0.37 reports a transaction that lost to a concurrent
+    writer only as a `RuntimeError` with one of these phrases - there's
+    no dedicated type to catch. LanceDB itself can't rebase an
+    "incompatible" one, but rerunning our whole build from the vault
+    files is always safe. `test_is_retryable_conflict_matches_a_real_
+    lancedb_conflict` pins the wording against a real conflict."""
+    return isinstance(exc, RuntimeError) and any(
+        marker in str(exc) for marker in _LANCE_CONFLICT_MARKERS
+    )
+
+
+def _reindex_with_retry(
+    vault_root: Path, *, force: bool = False, extract_sidecars: bool = False
+) -> IndexReport:
+    """Retrying rebuilds the whole index, which stays cheap: rows the
+    failed attempt already wrote have matching hashes, so only the FTS
+    index and compaction rerun. Each attempt reads a fresh snapshot."""
+    index_path = default_index_path(vault_root)
+    for attempt in range(_REINDEX_ATTEMPTS):
+        try:
+            return build_index(
+                read_vault(vault_root),
+                index_path,
+                force=force,
+                extract_sidecars=extract_sidecars,
+            )
+        except RuntimeError as exc:
+            if not _is_retryable_conflict(exc) or attempt == _REINDEX_ATTEMPTS - 1:
+                raise
+            delay = _REINDEX_BACKOFF_SECONDS * 2**attempt
+            time.sleep(delay * (1 + random.random()))  # noqa: S311 - jitter, not crypto
+    raise AssertionError  # unreachable: the loop returns or raises
+
+
+def _refresh_after_write(vault_root: Path) -> None:
+    """A write's last step. The file change is already durable; if the
+    index stays contended after retries, leave it stale (search reports
+    staleness, the next reindex converges) rather than fail the write."""
+    try:
+        _reindex_with_retry(vault_root)
+    except RuntimeError as exc:
+        if not _is_retryable_conflict(exc):
+            raise
+        logger.warning(
+            "index refresh for %s lost to concurrent writers; the index is "
+            "stale until the next reindex: %s",
+            vault_root,
+            exc,
+        )
 
 
 # --- Writing: add_document() ------------------------------------------
@@ -937,23 +1078,32 @@ def add_document(  # noqa: PLR0913, PLR0917 - the deliverable's public signature
             return snapshot.document_paths[existing.id]
 
     docs_dir = snapshot.vacancy_paths[vacancy_id].parent / DOCUMENTS_DIRNAME
-    filename = _derive_document_filename(docs_dir, date, kind, title)
-    target = docs_dir / filename
-    _ensure_within_vault(vault_root, target)
+    # A concurrent writer can take the derived name between derivation
+    # and publish; re-deriving then yields the next free suffix.
+    for _ in range(_MAX_FILENAME_SUFFIX_ATTEMPTS):
+        filename = _derive_document_filename(docs_dir, date, kind, title)
+        target = docs_dir / filename
+        _ensure_within_vault(vault_root, target)
 
-    document = Document(
-        id=target.stem,
-        vacancy_id=vacancy_id,
-        kind=kind,
-        title=title,
-        date=date,
-        external_id=external_id,
-    )
-    metadata = document.model_dump(mode="json", exclude_none=True)
-    text = frontmatter.serialize(metadata, content)
-    _atomic_write(target, text, overwrite=False)
+        document = Document(
+            id=target.stem,
+            vacancy_id=vacancy_id,
+            kind=kind,
+            title=title,
+            date=date,
+            external_id=external_id,
+        )
+        metadata = document.model_dump(mode="json", exclude_none=True)
+        text = frontmatter.serialize(metadata, content)
+        try:
+            _atomic_write(target, text, overwrite=False)
+            break
+        except DocumentAlreadyExistsError:
+            continue
+    else:
+        raise DocumentAlreadyExistsError(target)
 
-    reindex(vault=vault_root)
+    _refresh_after_write(vault_root)
     return target
 
 
@@ -1155,7 +1305,9 @@ def set_status(  # noqa: PLR0913 - the deliverable's public signature; each is m
     every other line byte-for-byte (design.md decision 6) - `stage_note`
     is never touched. Refreshes the index before returning; that
     vacancy's document rows get the new status without being
-    re-embedded (design.md decision 4).
+    re-embedded (design.md decision 4). Raises
+    `ConcurrentModificationError`, writing nothing, if `vacancy.md`
+    changed after it was read.
     """
     vault_root = resolve_vault_path(vault)
     snapshot = read_vault(vault_root)
@@ -1204,9 +1356,9 @@ def set_status(  # noqa: PLR0913 - the deliverable's public signature; each is m
 
     new_body = _append_status_history(body, current_status, target_status, note)
     new_text = frontmatter.serialize(metadata, new_body)
-    _atomic_write(vacancy_path, new_text, overwrite=True)
+    _replace_if_unchanged(vacancy_path, original_text, new_text)
 
-    reindex(vault=vault_root)
+    _refresh_after_write(vault_root)
 
     return StatusChange(
         vacancy_id=vacancy_id,
@@ -1448,7 +1600,9 @@ def edit_vacancy(  # noqa: PLR0913 - the deliverable's public signature; one par
     including the body's `# {role}` heading, is preserved byte-for-byte
     (decisions 5 and 8). The vacancy's id and directory never change,
     even when `found_date` or `role` - which contributed to that id
-    when it was minted - are edited (decision 3).
+    when it was minted - are edited (decision 3). Raises
+    `ConcurrentModificationError`, writing nothing, if `vacancy.md`
+    changed after it was read.
     """
     vault_root = resolve_vault_path(vault)
     snapshot = read_vault(vault_root)
@@ -1509,11 +1663,11 @@ def edit_vacancy(  # noqa: PLR0913 - the deliverable's public signature; one par
         _apply_field_to_metadata(metadata, change.field, change.new)
 
     new_body = _append_edit_history(body, changes)
-    _atomic_write(
-        vacancy_path, frontmatter.serialize(metadata, new_body), overwrite=True
+    _replace_if_unchanged(
+        vacancy_path, original_text, frontmatter.serialize(metadata, new_body)
     )
 
-    reindex(vault=vault_root)
+    _refresh_after_write(vault_root)
 
     return EditResult(vacancy_id=vacancy_id, changed=True, changes=changes)
 
@@ -1574,50 +1728,68 @@ def create_vacancy(  # noqa: PLR0913, PLR0917 - the deliverable's public signatu
     company_md_path = company_markdown_path(vault_root, company_slug)
 
     existing_ids = _existing_ids_for_collision_check(snapshot, company_directory)
-    vacancy_id = new_vacancy_id(found_date, company_slug, role, existing_ids)
-
-    try:
-        target_status = Status(status)
-        vacancy = Vacancy(
-            id=vacancy_id,
-            company=company,
-            company_slug=company_slug,
-            role=role,
-            source_url=source_url,
-            status=target_status,
-            found_date=found_date,
-            applied_date=applied_date,
-            stage_note=stage_note,
-            salary_note=salary_note,
-            recruiter=recruiter,
-            tags=tags or [],
-        )
-    except ValueError as exc:
-        # pydantic.ValidationError subclasses ValueError, so this catches
-        # both Status(status)'s invalid-value error and Vacancy's own
-        # field/model validation in one place.
-        raise InvalidVacancyDataError(vacancy_id, exc) from exc
+    fields: dict[str, object] = {
+        "company": company,
+        "company_slug": company_slug,
+        "role": role,
+        "source_url": source_url,
+        "status": status,
+        "found_date": found_date,
+        "applied_date": applied_date,
+        "stage_note": stage_note,
+        "salary_note": salary_note,
+        "recruiter": recruiter,
+        "tags": tags or [],
+    }
+    # Validate before touching the vault, so invalid input writes nothing.
+    vacancy = _new_vacancy_record(
+        new_vacancy_id(found_date, company_slug, role, existing_ids), fields
+    )
 
     if not company_md_path.exists():
         _ensure_within_vault(vault_root, company_md_path)
         company_record = Company(slug=company_slug, name=company)
         company_metadata = company_record.model_dump(mode="json", exclude_none=True)
-        _atomic_write(
-            company_md_path,
-            frontmatter.serialize(company_metadata, ""),
-            overwrite=False,
+        # A concurrent create for the same new company may win this
+        # race; its `_company.md` describes the same slug, so keep it.
+        with contextlib.suppress(DocumentAlreadyExistsError):
+            _atomic_write(
+                company_md_path,
+                frontmatter.serialize(company_metadata, ""),
+                overwrite=False,
+            )
+
+    # A concurrent create can publish the minted id first; mint the next.
+    for _ in range(_MAX_FILENAME_SUFFIX_ATTEMPTS):
+        vacancy_md_path = vacancy_markdown_path(vault_root, company_slug, vacancy.id)
+        _ensure_within_vault(vault_root, vacancy_md_path)
+        vacancy_metadata = vacancy.model_dump(
+            mode="json", exclude={"role_is_placeholder"}, exclude_none=True
         )
+        vacancy_text = frontmatter.serialize(vacancy_metadata, f"# {vacancy.role}\n")
+        try:
+            _atomic_write(vacancy_md_path, vacancy_text, overwrite=False)
+            break
+        except DocumentAlreadyExistsError:
+            existing_ids.add(vacancy.id)
+            vacancy = _new_vacancy_record(
+                new_vacancy_id(found_date, company_slug, role, existing_ids), fields
+            )
+    else:
+        raise DocumentAlreadyExistsError(vacancy_md_path)
 
-    vacancy_md_path = vacancy_markdown_path(vault_root, company_slug, vacancy_id)
-    _ensure_within_vault(vault_root, vacancy_md_path)
-    vacancy_metadata = vacancy.model_dump(
-        mode="json", exclude={"role_is_placeholder"}, exclude_none=True
-    )
-    vacancy_text = frontmatter.serialize(vacancy_metadata, f"# {vacancy.role}\n")
-    _atomic_write(vacancy_md_path, vacancy_text, overwrite=False)
-
-    reindex(vault=vault_root)
+    _refresh_after_write(vault_root)
     return vacancy_md_path
+
+
+def _new_vacancy_record(vacancy_id: str, fields: Mapping[str, object]) -> Vacancy:
+    try:
+        return Vacancy.model_validate({"id": vacancy_id, **fields})
+    except ValueError as exc:
+        # pydantic.ValidationError subclasses ValueError, so this catches
+        # both Status(status)'s invalid-value error and Vacancy's own
+        # field/model validation in one place.
+        raise InvalidVacancyDataError(vacancy_id, exc) from exc
 
 
 # --- Writing: find_existing() --------------------------------------------

@@ -19,6 +19,25 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **MCP tool calls no longer time out after writes or reindexing.** Tools
+  ran blocking vault and index work directly on the server's event
+  loop, so the whole server stopped responding while a write reindexed.
+  They now run in worker threads, with no lock between them.
+
+- **Several Claude/opencode instances and the CLI can write to one
+  vault at the same time.** New notes, documents, and vacancies can no
+  longer overwrite a file another writer created a moment earlier; the
+  later one gets the next free name or id. `set_status` and
+  `edit_vacancy` refuse to overwrite a `vacancy.md` that changed after
+  they read it (`ConcurrentModificationError`; call again). A write no
+  longer fails when its index refresh collides with another writer's:
+  the refresh retries, and if it still can't finish, the write
+  succeeds, a warning is logged, and `search` reports the index as
+  stale until the next reindex. Two limits remain: two changes to the
+  *same* vacancy at the same instant can still lose one of them, and
+  two overlapping `add_document` calls with the same `external_id` can
+  both file a copy.
+
 - opencode printed `unknown format "path" ignored in schema at path
   "#/properties/result"` on every start. `append_note` and
   `add_document` returned a `Path`, which FastMCP advertises as the
