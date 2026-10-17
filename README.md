@@ -264,8 +264,17 @@ suitable for piping.
 
 ```bash
 # List vacancies, optionally filtered (--status, --company, --since,
-# --needs-review, --stale-days), sorted by last activity.
+# --needs-review, --stale-days, --resume), sorted by last activity.
 vacancy-radar list --status applied --status interview
+
+# Compare resume variants (an A/B test of your resumes): for each
+# --resume label, how many applications used it and how they stand now.
+# Counts only vacancies already applied to. "advanced" means currently
+# screening / take_home / interview / offer - an application rejected
+# after an interview counts as rejected. Rates come from current status
+# and small counts are noise, so compare variants sent to comparable
+# roles and read the counts, not just the percentage.
+vacancy-radar resumes --since 2026-01-01
 
 # Show one vacancy or company - which kind it is is auto-detected.
 vacancy-radar show acme-corp
@@ -308,6 +317,12 @@ vacancy-radar note 2022-03-22-acme-corp-backend-engineer \
 # move off 'found' needs --applied-date.
 vacancy-radar status set 2022-03-22-acme-corp-backend-engineer \
     applied --applied-date 2026-01-15
+
+# Record which resume variant you applied with (any short label, e.g.
+# "backend-v2"). Also accepted by `new` and `edit` (`--clear resume`
+# removes it). Labels compare case-insensitively.
+vacancy-radar status set 2022-03-22-acme-corp-backend-engineer \
+    applied --applied-date 2026-01-15 --resume backend-v2
 vacancy-radar status set 2022-03-22-acme-corp-backend-engineer \
     found --force
 
@@ -321,7 +336,7 @@ vacancy-radar edit 2022-03-22-acme-corp-backend-engineer \
 
 # Remove a field with --clear (repeatable). Only the nullable fields can
 # be cleared: source-url, stage-note, salary-note, recruiter,
-# external-id, applied-date.
+# external-id, applied-date, resume.
 vacancy-radar edit 2022-03-22-acme-corp-backend-engineer \
     --clear recruiter --clear salary-note
 
@@ -405,7 +420,7 @@ default (2026-07-28, SEP-2577), so `--vault`/`VAULT_PATH` are the only
 two ways to point the server at a vault, exactly like configuring any
 other stdio MCP server.
 
-**Twelve tools**, matching `core.py`'s functions one for one - argument
+**Thirteen tools**, matching `core.py`'s functions one for one - argument
 marshalling only, no filtering/sorting/business logic of its own:
 
 | tool | delegates to |
@@ -417,6 +432,7 @@ marshalling only, no filtering/sorting/business logic of its own:
 | `read_document` | `core.read_document` |
 | `resolve` | `core.resolve` |
 | `find_existing` | `core.find_existing` |
+| `resume_stats` | `core.resume_stats` |
 | `append_note` | `core.append_note` |
 | `set_status` | `core.set_status` |
 | `edit_vacancy` | `core.edit_vacancy` |

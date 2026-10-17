@@ -17,6 +17,16 @@ project uses [Semantic Versioning](https://semver.org/).
   result; there is nothing to configure, and a client that has not
   negotiated the extension sees the same text output as before.
 
+- **Resume A/B tracking.** A vacancy can record which resume variant
+  you applied with — a short label such as `backend-v2` — via
+  `--resume` on `new`, `status set`, and `edit` (and the matching
+  `create_vacancy`, `set_status`, `edit_vacancy` MCP arguments).
+  `list --resume` / `list_vacancies(resume=...)` filter by it, and the
+  new `vacancy-radar resumes` command and `resume_stats` MCP tool
+  compare variants by application count, current status, and advance
+  rate. Existing vaults need no migration; applications without a
+  resume are reported on their own row.
+
 ### Fixed
 
 - **MCP tool calls no longer time out after writes or reindexing.** Tools

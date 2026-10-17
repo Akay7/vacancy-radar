@@ -150,7 +150,7 @@ def _render_write_outcome(
 
 
 @app.command("list")
-def list_command(  # noqa: PLR0913 - each option mirrors list_vacancies's own signature
+def list_command(  # noqa: PLR0913, PLR0917 - each option mirrors list_vacancies's own signature
     status: Annotated[
         list[str] | None,
         typer.Option("--status", help="Filter by status (repeatable)."),
@@ -169,6 +169,10 @@ def list_command(  # noqa: PLR0913 - each option mirrors list_vacancies's own si
     limit: Annotated[
         int, typer.Option("--limit", help="Maximum rows to return.")
     ] = core.DEFAULT_LIST_LIMIT,
+    resume: Annotated[
+        str | None,
+        typer.Option("--resume", help="Only vacancies applied with this resume."),
+    ] = None,
     *,
     needs_review: Annotated[
         bool, typer.Option("--needs-review", help="Only vacancies tagged needs_review.")
@@ -185,6 +189,7 @@ def list_command(  # noqa: PLR0913 - each option mirrors list_vacancies's own si
             since=_parse_date_option(since, option="--since"),
             stale_days=stale_days,
             needs_review=needs_review,
+            resume=resume,
             limit=limit,
         )
     except _CORE_ERRORS as exc:
@@ -206,6 +211,7 @@ def _render_vacancy_table(summaries: list[core.VacancySummary]) -> None:
     table.add_column("applied_date")
     table.add_column("last_activity")
     table.add_column("documents", justify="right")
+    table.add_column("resume")
     for s in summaries:
         table.add_row(
             s.id,
@@ -215,6 +221,7 @@ def _render_vacancy_table(summaries: list[core.VacancySummary]) -> None:
             s.applied_date.isoformat() if s.applied_date else "-",
             s.last_activity.isoformat(),
             str(s.document_count),
+            s.resume or "-",
         )
     console.print(table)
 
@@ -296,6 +303,8 @@ def _render_vacancy_detail(detail: core.VacancyDetail) -> None:
         console.print(f"salary note: {detail.salary_note}")
     if detail.recruiter:
         console.print(f"recruiter: {detail.recruiter}")
+    if detail.resume:
+        console.print(f"resume: {detail.resume}")
     if detail.tags:
         console.print(f"tags: {', '.join(detail.tags)}")
 
@@ -544,6 +553,10 @@ def status_set_command(  # noqa: PLR0913 - each option mirrors set_status's own 
             help="Required the first time a vacancy moves off 'found'.",
         ),
     ] = None,
+    resume: Annotated[
+        str | None,
+        typer.Option("--resume", help="The resume variant used for this application."),
+    ] = None,
     *,
     force: Annotated[
         bool, typer.Option("--force", help="Allow a backward transition.")
@@ -562,6 +575,7 @@ def status_set_command(  # noqa: PLR0913 - each option mirrors set_status's own 
             status,
             note=note,
             applied_date=applied_date_value,
+            resume=resume,
             force=force,
         )
     except _CORE_ERRORS as exc:
@@ -655,6 +669,10 @@ def edit_command(  # noqa: PLR0913, PLR0917 - one option per editable field, mir
     applied_date: Annotated[
         str | None, typer.Option("--applied-date", help="ISO date you applied.")
     ] = None,
+    resume: Annotated[
+        str | None,
+        typer.Option("--resume", help="The resume variant used for this application."),
+    ] = None,
     clear: Annotated[
         list[str] | None,
         typer.Option("--clear", help="Remove a field; repeatable."),
@@ -680,6 +698,7 @@ def edit_command(  # noqa: PLR0913, PLR0917 - one option per editable field, mir
         "tags": _parse_tags_option(tags),
         "found_date": _parse_date_option(found_date, option="--found-date"),
         "applied_date": _parse_date_option(applied_date, option="--applied-date"),
+        "resume": resume,
     }
 
     try:
@@ -835,6 +854,10 @@ def new_command(  # noqa: PLR0913 - each option mirrors create_vacancy's own sig
         str | None,
         typer.Option("--applied-date", help="Required when --status is not 'found'."),
     ] = None,
+    resume: Annotated[
+        str | None,
+        typer.Option("--resume", help="The resume variant used for this application."),
+    ] = None,
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit JSON instead of plain output.")
     ] = False,
@@ -851,6 +874,7 @@ def new_command(  # noqa: PLR0913 - each option mirrors create_vacancy's own sig
             status,
             source_url=url,
             applied_date=applied_date_value,
+            resume=resume,
         )
     except _CORE_ERRORS as exc:
         _fail(exc)
@@ -862,6 +886,59 @@ def new_command(  # noqa: PLR0913 - each option mirrors create_vacancy's own sig
     _render_write_outcome(
         path, outcome="created", as_json=as_json, extra={"id": vacancy_id}
     )
+
+
+# --- resumes -------------------------------------------------------------
+
+
+@app.command("resumes")
+def resumes_command(
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Only applications on/after this ISO date."),
+    ] = None,
+    *,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit JSON instead of a table.")
+    ] = False,
+) -> None:
+    """Compare resume variants by how their applications turned out.
+
+    Counts only vacancies already applied to. 'advanced' means currently
+    screening, take_home, interview, or offer - an application later
+    rejected counts as rejected, not advanced. Compare variants sent to
+    comparable roles, and mind small counts.
+    """
+    try:
+        rows = core.resume_stats(since=_parse_date_option(since, option="--since"))
+    except _CORE_ERRORS as exc:
+        _fail(exc)
+
+    if as_json:
+        _print_json([row.model_dump(mode="json") for row in rows])
+        return
+
+    if not rows:
+        console.print("No applications to compare.")
+        return
+
+    table = Table()
+    table.add_column("resume")
+    table.add_column("applications", justify="right")
+    table.add_column("advanced", justify="right")
+    table.add_column("rate", justify="right")
+    table.add_column("by status")
+    for row in rows:
+        by_status = ", ".join(f"{s.value} {n}" for s, n in row.by_status.items())
+        rate = f"{row.advance_rate:.0%}" if row.advance_rate is not None else "-"
+        table.add_row(
+            row.resume or "(no resume recorded)",
+            str(row.applications),
+            str(row.advanced),
+            rate,
+            by_status,
+        )
+    console.print(table)
 
 
 # --- reindex -----------------------------------------------------------

@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 import vacancy_radar
-from vacancy_radar import frontmatter
+from vacancy_radar import core, frontmatter
 from vacancy_radar.cli import app
 from vacancy_radar.index.build import build_index
 from vacancy_radar.index.store import default_index_path
@@ -1730,3 +1730,172 @@ def test_write_commands_still_reject_an_ambiguous_company_query(
     assert result.exit_code != 0
     assert "widget-us" in result.output
     assert "widget-eu" in result.output
+
+
+# --- add-resume-tracking: --resume options and the resumes command ----------
+
+
+def _vacancy_frontmatter(vault: Path, vacancy_id: str = "v1") -> dict:
+    metadata, _ = frontmatter.parse(
+        (vault / "tiny-corp" / vacancy_id / "vacancy.md").read_text(encoding="utf-8")
+    )
+    return metadata
+
+
+def test_edit_resume_sets_the_resume(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app, ["edit", "v1", "--resume", "backend-v2"], env={"VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code == 0
+    assert read_vault(vault).vacancies["v1"].resume == "backend-v2"
+
+
+def test_edit_clear_resume_removes_it(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault", resume="backend-v2")
+
+    result = runner.invoke(
+        app, ["edit", "v1", "--clear", "resume"], env={"VAULT_PATH": str(vault)}
+    )
+
+    assert result.exit_code == 0
+    assert "resume" not in _vacancy_frontmatter(vault)
+
+
+def test_status_set_resume_records_the_resume(tmp_path: Path) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app,
+        [
+            "status",
+            "set",
+            "v1",
+            "applied",
+            "--applied-date",
+            "2026-01-05",
+            "--resume",
+            "backend-v2",
+        ],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    vacancy = read_vault(vault).vacancies["v1"]
+    assert vacancy.status == Status.APPLIED
+    assert vacancy.resume == "backend-v2"
+
+
+def test_new_resume_records_the_resume(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    result = runner.invoke(
+        app,
+        [
+            "new",
+            "--company",
+            "Acme Corp",
+            "--role",
+            "Engineer",
+            "--found-date",
+            "2026-01-01",
+            "--status",
+            "applied",
+            "--applied-date",
+            "2026-01-02",
+            "--resume",
+            "backend-v2",
+        ],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    vacancies = list(read_vault(vault).vacancies.values())
+    assert [v.resume for v in vacancies] == ["backend-v2"]
+
+
+def test_list_resume_filters_and_json_reports_it(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault", resume="backend-v2")
+    _write_vacancy(
+        vault,
+        "tiny-corp",
+        "v9",
+        _simple_vacancy(
+            "v9", status=Status.APPLIED, applied_date=date(2026, 1, 3), resume="other"
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["list", "--resume", "BACKEND-v2", "--json"],
+        env={"VAULT_PATH": str(vault)},
+    )
+
+    assert result.exit_code == 0
+    rows = json.loads(result.output)
+    assert [(r["id"], r["resume"]) for r in rows] == [("v1", "backend-v2")]
+
+
+def test_show_prints_the_resume(tmp_path: Path) -> None:
+    vault = _edited_vault(tmp_path / "vault", resume="backend-v2")
+
+    result = runner.invoke(app, ["show", "v1"], env={"VAULT_PATH": str(vault)})
+
+    assert result.exit_code == 0
+    assert "resume: backend-v2" in result.output
+
+
+def _resumes_vault(vault: Path) -> Path:
+    _init_vault(vault)
+    _write_company(vault, "tiny-corp", "Tiny Corp")
+    for vacancy_id, status, resume in (
+        ("a1", Status.APPLIED, "backend-v2"),
+        ("a2", Status.INTERVIEW, "backend-v2"),
+        ("b1", Status.APPLIED, "backend-v1"),
+    ):
+        _write_vacancy(
+            vault,
+            "tiny-corp",
+            vacancy_id,
+            _simple_vacancy(
+                vacancy_id,
+                status=status,
+                applied_date=date(2026, 1, 3),
+                resume=resume,
+            ),
+        )
+    return vault
+
+
+def test_resumes_prints_one_row_per_resume(tmp_path: Path) -> None:
+    vault = _resumes_vault(tmp_path / "vault")
+
+    result = runner.invoke(
+        app, ["resumes"], env={"VAULT_PATH": str(vault), "COLUMNS": "200"}
+    )
+
+    assert result.exit_code == 0
+    assert "backend-v2" in result.output
+    assert "backend-v1" in result.output
+
+
+def test_resumes_json_equals_core_rows(tmp_path: Path) -> None:
+    vault = _resumes_vault(tmp_path / "vault")
+
+    result = runner.invoke(app, ["resumes", "--json"], env={"VAULT_PATH": str(vault)})
+
+    assert result.exit_code == 0
+    expected = [r.model_dump(mode="json") for r in core.resume_stats(vault=vault)]
+    assert json.loads(result.output) == expected
+
+
+def test_resumes_with_no_applications_says_so(tmp_path: Path) -> None:
+    vault = _minimal_vault(tmp_path / "vault")
+
+    result = runner.invoke(app, ["resumes"], env={"VAULT_PATH": str(vault)})
+
+    assert result.exit_code == 0
+    assert "No applications to compare" in result.output

@@ -306,22 +306,40 @@ def _register_read_tools(server: FastMCP, vault_path: Path) -> None:
         since: date | None = None,
         stale_days: int | None = None,
         needs_review: bool = False,  # noqa: FBT001, FBT002 - mirrors core.list_vacancies's own signature
+        resume: str | None = None,
         limit: int = core.DEFAULT_LIST_LIMIT,
     ) -> list[core.VacancySummary]:
         """List vacancies, optionally filtered by status, company,
         applied-on-or-after date, staleness (days since last activity),
-        or the needs_review tag. Returns compact summaries - id,
-        company, role, status, dates, document count - never document
-        bodies. Bounded by limit (default 50)."""
+        the needs_review tag, or the resume variant applied with.
+        Returns compact summaries - id, company, role, status, dates,
+        document count, resume - never document bodies. Bounded by
+        limit (default 50)."""
         return core.list_vacancies(
             status=status,
             company=company,
             since=since,
             stale_days=stale_days,
             needs_review=needs_review,
+            resume=resume,
             limit=limit,
             vault=vault_path,
         )
+
+    @server.tool(annotations=_READ_ONLY)
+    @_delegate
+    def resume_stats(since: date | None = None) -> list[core.ResumeStats]:
+        """Compare resume variants (an A/B test of your resumes) by how
+        their applications turned out. One row per resume label, plus a
+        row with resume=null for applications recorded without one:
+        applications, a count per status, how many are currently
+        advanced (screening, take_home, interview, or offer), and the
+        advance rate. Counts only vacancies already applied to; since
+        keeps those applied on or after that date. Rates come from
+        current status, so an application rejected after an interview
+        counts as rejected. Compare variants sent to comparable roles,
+        and mind small counts."""
+        return core.resume_stats(since=since, vault=vault_path)
 
     @server.tool(annotations=_READ_ONLY, app=_ui_app("get_company"))
     @_delegate
@@ -428,24 +446,28 @@ def _register_write_tools(server: FastMCP, vault_path: Path) -> None:
 
     @server.tool(annotations=_WRITE)
     @_delegate
-    def set_status(
+    def set_status(  # noqa: PLR0913, PLR0917 - mirrors core.set_status's own signature
         vacancy_id: str,
         new_status: Status,
         note: str | None = None,
         applied_date: date | None = None,
+        resume: str | None = None,
         force: bool = False,  # noqa: FBT001, FBT002 - mirrors core.set_status's own signature
     ) -> core.StatusChange:
         """Change a vacancy's status, validating the transition against
         the permitted status graph (see the vacancy-radar://statuses
         resource). Moving a vacancy off "found" for the first time
-        requires applied_date. A backward transition requires
-        force=true. Appends a dated entry to the vacancy's status
-        history; never touches stage_note."""
+        requires applied_date; pass resume (a short label such as
+        "backend-v2") to record which resume variant you applied with.
+        A backward transition requires force=true. Appends a dated
+        entry to the vacancy's status history; never touches
+        stage_note."""
         return core.set_status(
             vacancy_id,
             new_status,
             note=note,
             applied_date=applied_date,
+            resume=resume,
             force=force,
             vault=vault_path,
         )
@@ -463,6 +485,7 @@ def _register_write_tools(server: FastMCP, vault_path: Path) -> None:
         tags: list[str] | None = None,
         found_date: date | None = None,
         applied_date: date | None = None,
+        resume: str | None = None,
         clear: list[str] | None = None,
     ) -> core.EditResult:
         """Correct a vacancy's stored fields - a moved posting URL, a
@@ -471,8 +494,9 @@ def _register_write_tools(server: FastMCP, vault_path: Path) -> None:
         Omitting a parameter leaves that field alone; there is no way to
         set a field to null by passing null. To remove a field, name it
         in clear (e.g. clear=["recruiter"]) - only source_url,
-        stage_note, salary_note, recruiter, external_id, and
-        applied_date can be cleared. tags replaces the whole list, so
+        stage_note, salary_note, recruiter, external_id, applied_date,
+        and resume can be cleared. resume is the label of the resume
+        variant used for the application. tags replaces the whole list, so
         pass the tags you want to keep alongside any you are adding.
 
         Status is not editable here - use set_status, which validates
@@ -490,6 +514,7 @@ def _register_write_tools(server: FastMCP, vault_path: Path) -> None:
                 "tags": tags,
                 "found_date": found_date,
                 "applied_date": applied_date,
+                "resume": resume,
             },
             clear,
         )
@@ -531,6 +556,7 @@ def _register_write_tools(server: FastMCP, vault_path: Path) -> None:
         salary_note: str | None = None,
         recruiter: str | None = None,
         tags: list[str] | None = None,
+        resume: str | None = None,
     ) -> dict[str, str]:
         """Create a new vacancy, and its company directory if one
         doesn't exist yet. This tool exists for conversational import:
@@ -563,6 +589,7 @@ def _register_write_tools(server: FastMCP, vault_path: Path) -> None:
             salary_note=salary_note,
             recruiter=recruiter,
             tags=tags,
+            resume=resume,
             vault=vault_path,
         )
         return {"path": str(path), "id": path.parent.name}

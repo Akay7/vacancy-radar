@@ -10,7 +10,7 @@ from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 from fastmcp.apps import UI_MIME_TYPE as APP_MIME_TYPE
@@ -47,7 +47,7 @@ _MODEL_NOT_LOADED_AT_BUILD_MSG = "embedding model should not load at server buil
 _MODEL_NOT_LOADED_FOR_KEYWORD_MSG = (
     "embedding model should not load for a keyword search"
 )
-_EXPECTED_TOOL_COUNT = 12
+_EXPECTED_TOOL_COUNT = 13
 
 
 def _init_vault(vault: Path) -> None:
@@ -390,6 +390,7 @@ def test_list_vacancies_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
         since=None,
         stale_days=None,
         needs_review=False,
+        resume=None,
         limit=core.DEFAULT_LIST_LIMIT,
         vault=vault,
     )
@@ -406,6 +407,7 @@ def test_list_vacancies_schema_matches_core_param_names() -> None:
         "since",
         "stale_days",
         "needs_review",
+        "resume",
         "limit",
     }
 
@@ -652,7 +654,13 @@ def test_set_status_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
     run(server.call_tool("set_status", {"vacancy_id": "v1", "new_status": "screening"}))
 
     mock.assert_called_once_with(
-        "v1", Status.SCREENING, note=None, applied_date=None, force=False, vault=vault
+        "v1",
+        Status.SCREENING,
+        note=None,
+        applied_date=None,
+        resume=None,
+        force=False,
+        vault=vault,
     )
 
 
@@ -799,6 +807,7 @@ def test_create_vacancy_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
         salary_note=None,
         recruiter=None,
         tags=None,
+        resume=None,
         vault=vault,
     )
     assert (
@@ -823,6 +832,7 @@ def test_create_vacancy_schema_matches_core_param_names() -> None:
         "salary_note",
         "recruiter",
         "tags",
+        "resume",
     }
 
 
@@ -855,6 +865,7 @@ def test_create_vacancy_omitting_optional_fields_matches_core_defaults(
         salary_note=None,
         recruiter=None,
         tags=None,
+        resume=None,
         vault=vault,
     )
 
@@ -1163,7 +1174,7 @@ def test_find_existing_tool_matches_source_url_across_company_spellings(
 # --- Section 20: annotations / tool-list membership -------------------
 
 
-def test_tool_list_is_exactly_the_twelve_specified_tools() -> None:
+def test_tool_list_is_exactly_the_thirteen_specified_tools() -> None:
     server = mcp_server.build_server(Path("/vault"))
     names = {t.name for t in run(server.list_tools())}
     assert names == {
@@ -1174,6 +1185,7 @@ def test_tool_list_is_exactly_the_twelve_specified_tools() -> None:
         "read_document",
         "resolve",
         "find_existing",
+        "resume_stats",
         "append_note",
         "set_status",
         "edit_vacancy",
@@ -1199,6 +1211,7 @@ def test_read_tools_have_read_only_hint_true() -> None:
         "read_document",
         "resolve",
         "find_existing",
+        "resume_stats",
     }
     for tool in run(server.list_tools()):
         if tool.name in read_tools:
@@ -1962,3 +1975,71 @@ def test_subprocess_serves_ui_views_and_unchanged_text_to_a_plain_client(
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+# --- add-resume-tracking ------------------------------------------------------
+
+
+def test_resume_stats_tool_delegates_to_core(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = [
+        core.ResumeStats(
+            resume="backend-v2",
+            applications=2,
+            by_status={Status.APPLIED: 1, Status.INTERVIEW: 1},
+            advanced=1,
+            advance_rate=0.5,
+        )
+    ]
+    mock = MagicMock(return_value=rows)
+    monkeypatch.setattr(core, "resume_stats", mock)
+    server = mcp_server.build_server(Path("/vault"))
+
+    result = run(server.call_tool("resume_stats", {"since": "2026-02-01"}))
+
+    mock.assert_called_once_with(since=date(2026, 2, 1), vault=Path("/vault"))
+    assert result.structured_content["result"] == [
+        {
+            "resume": "backend-v2",
+            "applications": 2,
+            "by_status": {"applied": 1, "interview": 1},
+            "advanced": 1,
+            "advance_rate": 0.5,
+        }
+    ]
+
+
+def test_resume_stats_tool_is_read_only_without_a_ui_view() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    tool = next(t for t in run(server.list_tools()) if t.name == "resume_stats")
+
+    assert tool.annotations.read_only_hint is True
+    assert tool.annotations.open_world_hint is False
+    assert not (tool.meta or {}).get("ui")
+
+
+def test_write_tool_schemas_accept_resume() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    tools = {t.name: t for t in run(server.list_tools())}
+
+    for name in ("set_status", "create_vacancy", "edit_vacancy"):
+        assert "resume" in tools[name].parameters["properties"]
+    assert "resume" in tools["list_vacancies"].parameters["properties"]
+
+
+def test_set_status_and_edit_tools_record_and_clear_a_resume(tmp_path: Path) -> None:
+    vault = _editable_vault(tmp_path / "vault")
+    server = mcp_server.build_server(vault)
+
+    run(server.call_tool("edit_vacancy", {"vacancy_id": "v1", "resume": "backend-v2"}))
+    assert read_vault(vault).vacancies["v1"].resume == "backend-v2"
+
+    run(server.call_tool("edit_vacancy", {"vacancy_id": "v1", "clear": ["resume"]}))
+    assert read_vault(vault).vacancies["v1"].resume is None
+
+    run(
+        server.call_tool(
+            "set_status",
+            {"vacancy_id": "v1", "new_status": "screening", "resume": "backend-v3"},
+        )
+    )
+    assert read_vault(vault).vacancies["v1"].resume == "backend-v3"

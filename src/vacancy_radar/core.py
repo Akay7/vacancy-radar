@@ -384,6 +384,7 @@ class VacancySummary(BaseModel):
     applied_date: date | None = None
     last_activity: date
     document_count: int
+    resume: str | None = None
 
 
 def list_vacancies(  # noqa: PLR0913 - the deliverable's public signature; each is meaningful
@@ -393,6 +394,7 @@ def list_vacancies(  # noqa: PLR0913 - the deliverable's public signature; each 
     since: date | None = None,
     stale_days: int | None = None,
     needs_review: bool = False,
+    resume: str | None = None,
     limit: int = DEFAULT_LIST_LIMIT,
     sort: str = "activity",
     vault: Path | None = None,
@@ -415,6 +417,9 @@ def list_vacancies(  # noqa: PLR0913 - the deliverable's public signature; each 
         vacancies = [v for v in vacancies if (v.applied_date or v.found_date) >= since]
     if needs_review:
         vacancies = [v for v in vacancies if NEEDS_REVIEW_TAG in v.tags]
+    if resume is not None:
+        wanted_resume = _resume_key(resume)
+        vacancies = [v for v in vacancies if _resume_key(v.resume) == wanted_resume]
     if stale_days is not None:
         # Local calendar day, not UTC's - this is a local-first personal
         # tool, and "today" should match the day the user is actually
@@ -431,6 +436,14 @@ def list_vacancies(  # noqa: PLR0913 - the deliverable's public signature; each 
     return summaries[:limit]
 
 
+def _resume_key(resume: str | None) -> str | None:
+    """A resume label's comparison form: trimmed and case-folded, so
+    `Backend-V2` and ` backend-v2 ` are one variant."""
+    if resume is None:
+        return None
+    return resume.strip().casefold()
+
+
 def _vacancy_summary(vacancy_id: str, snapshot: VaultSnapshot) -> VacancySummary:
     vacancy = snapshot.vacancies[vacancy_id]
     return VacancySummary(
@@ -441,7 +454,74 @@ def _vacancy_summary(vacancy_id: str, snapshot: VaultSnapshot) -> VacancySummary
         applied_date=vacancy.applied_date,
         last_activity=snapshot.last_activity(vacancy.id),
         document_count=len(snapshot.documents_for(vacancy.id)),
+        resume=vacancy.resume,
     )
+
+
+# --- Resume comparison -----------------------------------------------------
+
+ADVANCED_STATUSES: frozenset[Status] = frozenset(
+    {Status.SCREENING, Status.TAKE_HOME, Status.INTERVIEW, Status.OFFER}
+)
+"""The statuses `resume_stats` counts as "advanced" - the application
+got past the initial applied state and was not (yet) turned down or
+dropped. Read from current status only (add-resume-tracking's
+design.md decision 5)."""
+
+
+class ResumeStats(BaseModel):
+    """One `resume_stats` row: how the applications sent with one
+    resume label currently stand. `resume=None` is the row for
+    applications recorded without a resume."""
+
+    resume: str | None
+    applications: int
+    by_status: dict[Status, int]
+    advanced: int
+    advance_rate: float | None
+
+
+def resume_stats(
+    since: date | None = None, vault: Path | None = None
+) -> list[ResumeStats]:
+    """Compare resume variants by how their applications turned out.
+
+    Only vacancies that have been applied to (status other than
+    `found`) are counted; `since` keeps those whose `applied_date` is on
+    or after it. Labels group case-insensitively after trimming and are
+    reported lower-cased. Read from the vault snapshot - the index is
+    never opened. Rows run by application count descending, then label,
+    with the no-resume row last."""
+    snapshot = read_vault(resolve_vault_path(vault))
+
+    grouped: dict[str | None, list[Vacancy]] = {}
+    for vacancy in snapshot.vacancies.values():
+        if vacancy.status is Status.FOUND or vacancy.applied_date is None:
+            continue
+        if since is not None and vacancy.applied_date < since:
+            continue
+        grouped.setdefault(_resume_key(vacancy.resume), []).append(vacancy)
+
+    rows: list[ResumeStats] = []
+    for key, vacancies in grouped.items():
+        by_status = {
+            status: count
+            for status in Status
+            if (count := sum(1 for v in vacancies if v.status is status))
+        }
+        advanced = sum(1 for v in vacancies if v.status in ADVANCED_STATUSES)
+        rows.append(
+            ResumeStats(
+                resume=key,
+                applications=len(vacancies),
+                by_status=by_status,
+                advanced=advanced,
+                advance_rate=advanced / len(vacancies),
+            )
+        )
+
+    rows.sort(key=lambda r: (r.resume is None, -r.applications, r.resume or ""))
+    return rows
 
 
 # --- Company dossier -------------------------------------------------------
@@ -527,6 +607,7 @@ class VacancyDetail(BaseModel):
     salary_note: str | None = None
     recruiter: str | None = None
     external_id: str | None = None
+    resume: str | None = None
     tags: list[str] = Field(default_factory=list)
     documents: list[DocumentSummary] = Field(default_factory=list)
 
@@ -562,6 +643,7 @@ def get_vacancy(id_or_query: str, vault: Path | None = None) -> VacancyDetail:
         salary_note=vacancy.salary_note,
         recruiter=vacancy.recruiter,
         external_id=vacancy.external_id,
+        resume=vacancy.resume,
         tags=list(vacancy.tags),
         documents=documents,
     )
@@ -1290,6 +1372,7 @@ def set_status(  # noqa: PLR0913 - the deliverable's public signature; each is m
     note: str | None = None,
     applied_date: date | None = None,
     *,
+    resume: str | None = None,
     force: bool = False,
     vault: Path | None = None,
 ) -> StatusChange:
@@ -1308,6 +1391,11 @@ def set_status(  # noqa: PLR0913 - the deliverable's public signature; each is m
     re-embedded (design.md decision 4). Raises
     `ConcurrentModificationError`, writing nothing, if `vacancy.md`
     changed after it was read.
+
+    `resume`, when given, records the resume variant used in the same
+    write; a value that differs from the stored one also lands in the
+    `## Edit History` block (add-resume-tracking's design.md decision 4).
+    A same-status call ignores it - use `edit_vacancy`.
     """
     vault_root = resolve_vault_path(vault)
     snapshot = read_vault(vault_root)
@@ -1349,12 +1437,24 @@ def set_status(  # noqa: PLR0913 - the deliverable's public signature; each is m
     else:
         metadata["applied_date"] = effective_applied_date.isoformat()
 
+    if resume is not None:
+        metadata["resume"] = resume
+
     try:
-        Vacancy(**metadata)
+        updated = Vacancy(**metadata)
     except ValidationError as exc:
         raise InvalidVacancyDataError(vacancy_id, exc) from exc
 
     new_body = _append_status_history(body, current_status, target_status, note)
+    if resume is not None:
+        # The validated (trimmed) value, so the file never stores the
+        # untrimmed form.
+        metadata["resume"] = updated.resume
+        if updated.resume != vacancy.resume:
+            new_body = _append_edit_history(
+                new_body,
+                [FieldChange(field="resume", old=vacancy.resume, new=updated.resume)],
+            )
     new_text = frontmatter.serialize(metadata, new_body)
     _replace_if_unchanged(vacancy_path, original_text, new_text)
 
@@ -1400,6 +1500,7 @@ EDITABLE_FIELDS: tuple[str, ...] = (
     "tags",
     "found_date",
     "applied_date",
+    "resume",
 )
 """Exactly the fields `edit_vacancy` accepts. `id`, `status`,
 `company`, and `company_slug` are absent by design (edit-vacancy-fields'
@@ -1409,7 +1510,7 @@ and the company pair determines where the vacancy directory lives."""
 
 NULLABLE_EDITABLE_FIELDS: frozenset[str] = frozenset(
     {"source_url", "stage_note", "salary_note", "recruiter", "external_id",
-     "applied_date"}
+     "applied_date", "resume"}
 )  # fmt: skip
 """The editable fields that can be cleared. `role` and `found_date` are
 mandatory on `Vacancy`; `tags` is emptied by setting `[]`, not cleared."""
@@ -1578,6 +1679,7 @@ def edit_vacancy(  # noqa: PLR0913 - the deliverable's public signature; one par
     tags: Unsettable[list[str]] = UNSET,
     found_date: Unsettable[date] = UNSET,
     applied_date: Unsettable[date | None] = UNSET,
+    resume: Unsettable[str | None] = UNSET,
     vault: Path | None = None,
 ) -> EditResult:
     """Set one or more of a vacancy's editable frontmatter fields in a
@@ -1623,6 +1725,7 @@ def edit_vacancy(  # noqa: PLR0913 - the deliverable's public signature; one par
             ("tags", tags),
             ("found_date", found_date),
             ("applied_date", applied_date),
+            ("resume", resume),
         )
         if not isinstance(value, _UnsetType)
     }
@@ -1700,6 +1803,7 @@ def create_vacancy(  # noqa: PLR0913, PLR0917 - the deliverable's public signatu
     salary_note: str | None = None,
     recruiter: str | None = None,
     tags: list[str] | None = None,
+    resume: str | None = None,
     *,
     vault: Path | None = None,
 ) -> Path:
@@ -1711,7 +1815,7 @@ def create_vacancy(  # noqa: PLR0913, PLR0917 - the deliverable's public signatu
     decision 8). Never overwrites anything - `new_vacancy_id`'s
     suffixing means a second call with the same inputs mints a distinct
     id, not a collision. `source_url`/`stage_note`/`salary_note`/
-    `recruiter`/`tags` are optional and forwarded to `Vacancy` unchanged
+    `recruiter`/`tags`/`resume` are optional and forwarded to `Vacancy` unchanged
     (`tags` defaults to an empty list, matching `Vacancy`'s own default,
     when omitted) - see the llm-import change's design.md decision 5
     and the optional-vacancy-url change's design.md decision 1 (the
@@ -1740,6 +1844,7 @@ def create_vacancy(  # noqa: PLR0913, PLR0917 - the deliverable's public signatu
         "salary_note": salary_note,
         "recruiter": recruiter,
         "tags": tags or [],
+        "resume": resume,
     }
     # Validate before touching the vault, so invalid input writes nothing.
     vacancy = _new_vacancy_record(

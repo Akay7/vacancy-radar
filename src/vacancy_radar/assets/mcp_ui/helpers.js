@@ -21,7 +21,35 @@ function root() {
   return r;
 }
 
-function sc(params) { return (params && params.structuredContent) || {}; }
+function normalizeResult(data) {
+  if (Array.isArray(data)) return { result: data };
+  if (!data || typeof data !== "object") return null;
+  if (data.structuredContent) {
+    var structured = normalizeResult(data.structuredContent);
+    if (structured) return structured;
+  }
+  if (data.result !== undefined) {
+    if (Array.isArray(data.result)) return data;
+    var nested = normalizeResult(data.result);
+    if (nested) return nested;
+  }
+  return Object.keys(data).length ? data : null;
+}
+
+// Some hosts wrap the tool result again, or forward only its JSON text block.
+function sc(params) {
+  var structured = normalizeResult(params && params.structuredContent);
+  if (structured) return structured;
+  var blocks = (params && params.content) || [];
+  for (var i = 0; i < blocks.length; i++) {
+    if (blocks[i].type !== "text") continue;
+    try {
+      var parsed = normalizeResult(JSON.parse(blocks[i].text));
+      if (parsed) return parsed;
+    } catch (e) { /* not JSON */ }
+  }
+  return {};
+}
 
 function count(n, one, many) { return n + " " + (n === 1 ? one : many); }
 

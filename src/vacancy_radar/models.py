@@ -12,6 +12,9 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
+MAX_RESUME_LENGTH = 64
+"""The longest `Vacancy.resume` label, in characters."""
+
 UNKNOWN_ROLE = "unknown"
 """The single sentinel for a role that could not be determined."""
 
@@ -109,6 +112,10 @@ class Vacancy(BaseModel):
     when a value is given (see optional-vacancy-url change's
     design.md)."""
     applied_date: date | None = None
+    resume: str | None = None
+    """Optional label of the resume variant sent for this vacancy (see
+    the add-resume-tracking change). Free-form, trimmed; allowed at any
+    status - only `resume_stats` cares whether it was applied."""
 
     stage_note: str | None = None
     salary_note: str | None = None
@@ -125,6 +132,23 @@ class Vacancy(BaseModel):
             msg = "source_url must be an http or https URL"
             raise ValueError(msg)
         return value
+
+    @field_validator("resume")
+    @classmethod
+    def _validate_resume_label(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        label = value.strip()
+        if not label:
+            msg = "resume must not be empty or whitespace-only"
+            raise ValueError(msg)
+        if "\n" in label or "\r" in label:
+            msg = "resume must be a single line"
+            raise ValueError(msg)
+        if len(label) > MAX_RESUME_LENGTH:
+            msg = f"resume must be at most {MAX_RESUME_LENGTH} characters"
+            raise ValueError(msg)
+        return label
 
     @field_validator("role")
     @classmethod

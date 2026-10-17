@@ -117,6 +117,7 @@ def _vacancy_summary_fields() -> set[str]:
         "applied_date",
         "last_activity",
         "document_count",
+        "resume",
     }
 
 
@@ -2633,3 +2634,305 @@ def test_resolve_vacancy_modifies_no_file(tmp_path: Path) -> None:
         core.resolve_vacancy("zzz-nonexistent-zzz", vault=vault)
 
     assert _snapshot_files(vault) == before
+
+
+# --- add-resume-tracking: resume field, filter, and stats ------------------
+
+
+def _vacancy_text(vault: Path, vacancy_id: str, slug: str = "tiny-corp") -> str:
+    return (vault / slug / vacancy_id / "vacancy.md").read_text(encoding="utf-8")
+
+
+def test_create_vacancy_stores_resume_trimmed(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    path = core.create_vacancy(
+        "Acme Corp",
+        "Engineer",
+        date(2026, 1, 1),
+        Status.APPLIED,
+        applied_date=date(2026, 1, 2),
+        resume="  backend-v2 ",
+        vault=vault,
+    )
+
+    metadata, _ = frontmatter.parse(path.read_text(encoding="utf-8"), filename="x")
+    assert metadata["resume"] == "backend-v2"
+
+
+def test_create_vacancy_without_resume_has_no_resume_key(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    path = core.create_vacancy(
+        "Acme Corp", "Engineer", date(2026, 1, 1), Status.FOUND, vault=vault
+    )
+
+    metadata, _ = frontmatter.parse(path.read_text(encoding="utf-8"), filename="x")
+    assert "resume" not in metadata
+
+
+def test_create_vacancy_rejects_a_blank_resume_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    before = _snapshot_files(vault)
+
+    with pytest.raises(core.InvalidVacancyDataError):
+        core.create_vacancy(
+            "Acme Corp",
+            "Engineer",
+            date(2026, 1, 1),
+            Status.FOUND,
+            resume="   ",
+            vault=vault,
+        )
+
+    assert _snapshot_files(vault) == before
+
+
+def test_edit_vacancy_sets_then_clears_resume_with_history(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+
+    core.edit_vacancy("v2", resume="backend-v2", vault=vault)
+    assert read_vault(vault).vacancies["v2"].resume == "backend-v2"
+    assert "resume: (none) -> backend-v2" in _vacancy_text(vault, "v2")
+
+    core.edit_vacancy("v2", resume=None, vault=vault)
+    assert read_vault(vault).vacancies["v2"].resume is None
+    assert "resume: backend-v2 -> (none)" in _vacancy_text(vault, "v2")
+
+
+def test_edit_vacancy_rejects_a_whitespace_resume_and_leaves_vault(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    before = _vacancy_text(vault, "v2")
+
+    with pytest.raises(core.InvalidVacancyDataError):
+        core.edit_vacancy("v2", resume="   ", vault=vault)
+
+    assert _vacancy_text(vault, "v2") == before
+
+
+def test_edit_vacancy_restating_the_same_resume_is_a_no_op(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, resume="backend-v2")
+    before = _vacancy_text(vault, "v2")
+
+    result = core.edit_vacancy("v2", resume=" backend-v2 ", vault=vault)
+
+    assert result.changed is False
+    assert _vacancy_text(vault, "v2") == before
+
+
+def test_resolve_field_edits_accepts_resume_and_clear_resume() -> None:
+    assert core.resolve_field_edits({"resume": "a"}) == {"resume": "a"}
+    assert core.resolve_field_edits({}, clear=["resume"]) == {"resume": None}
+
+
+def test_set_status_with_resume_stores_it_and_records_edit_history(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _write_vacancy(vault, "tiny-corp", "v3", _simple_vacancy("v3"))
+
+    core.set_status(
+        "v3",
+        "applied",
+        applied_date=date(2026, 1, 5),
+        resume="backend-v2",
+        vault=vault,
+    )
+
+    assert read_vault(vault).vacancies["v3"].resume == "backend-v2"
+    text = _vacancy_text(vault, "v3")
+    assert "## Edit History" in text
+    assert "resume: (none) -> backend-v2" in text
+
+
+def test_set_status_without_resume_leaves_stored_resume_and_history(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, resume="backend-v2")
+
+    core.set_status("v2", "screening", vault=vault)
+
+    assert read_vault(vault).vacancies["v2"].resume == "backend-v2"
+    assert "## Edit History" not in _vacancy_text(vault, "v2")
+
+
+def test_set_status_with_unchanged_resume_adds_no_edit_history(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, resume="backend-v2")
+
+    core.set_status("v2", "screening", resume="backend-v2", vault=vault)
+
+    assert "## Edit History" not in _vacancy_text(vault, "v2")
+
+
+def test_set_status_same_status_with_resume_changes_nothing(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    before = _vacancy_text(vault, "v2")
+
+    change = core.set_status("v2", "applied", resume="backend-v2", vault=vault)
+
+    assert change.changed is False
+    assert _vacancy_text(vault, "v2") == before
+
+
+def test_set_status_invalid_resume_writes_nothing(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault)
+    before = _vacancy_text(vault, "v2")
+
+    with pytest.raises(core.InvalidVacancyDataError):
+        core.set_status("v2", "screening", resume="a\nb", vault=vault)
+
+    assert _vacancy_text(vault, "v2") == before
+
+
+def test_set_status_round_trip_with_resume_differs_only_in_expected_lines(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, recruiter="Jane Recruiter", tags=["needs_review"])
+    before_lines = set(_vacancy_text(vault, "v2").splitlines())
+
+    core.set_status("v2", "screening", resume="backend-v2", vault=vault)
+
+    after_lines = set(_vacancy_text(vault, "v2").splitlines())
+    for line in before_lines ^ after_lines:
+        assert line.startswith(("status:", "resume:", "- ")) or line in (
+            "## Status History",
+            "## Edit History",
+            "",
+        )
+
+
+def test_summaries_and_detail_report_resume(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, "v2", resume="backend-v2")
+
+    summaries = {s.id: s for s in core.list_vacancies(vault=vault)}
+
+    assert summaries["v2"].resume == "backend-v2"
+    assert summaries["v1"].resume is None
+    assert core.get_vacancy("v2", vault=vault).resume == "backend-v2"
+    assert core.get_vacancy("v1", vault=vault).resume is None
+
+
+def test_list_vacancies_resume_filter_matches_case_and_whitespace_insensitively(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, "v2", resume="Backend-V2")
+    _applied_vacancy(vault, "v3", resume="backend-v1")
+    _applied_vacancy(vault, "v4", status=Status.INTERVIEW, resume="backend-v2")
+
+    matched = core.list_vacancies(resume=" backend-v2 ", vault=vault)
+    combined = core.list_vacancies(
+        resume="backend-v2", status=[Status.INTERVIEW], vault=vault
+    )
+
+    assert {s.id for s in matched} == {"v2", "v4"}
+    assert [s.id for s in combined] == ["v4"]
+
+
+def _stats_vault(tmp_path: Path) -> Path:
+    vault = _minimal_built_vault(tmp_path / "vault")  # v1: found, no resume
+    _applied_vacancy(vault, "a1", resume="backend-v2")
+    _applied_vacancy(vault, "a2", status=Status.INTERVIEW, resume="Backend-V2")
+    _applied_vacancy(vault, "a3", status=Status.REJECTED, resume="backend-v2")
+    _applied_vacancy(vault, "b1", resume="backend-v1")
+    _applied_vacancy(vault, "n1")
+    _write_vacancy(
+        vault,
+        "tiny-corp",
+        "f1",
+        _simple_vacancy("f1", resume="backend-v2"),
+    )
+    return vault
+
+
+def test_resume_stats_counts_applications_per_resume_and_status(
+    tmp_path: Path,
+) -> None:
+    vault = _stats_vault(tmp_path)
+
+    rows = {r.resume: r for r in core.resume_stats(vault=vault)}
+
+    v2 = rows["backend-v2"]
+    assert v2.applications == 3  # noqa: PLR2004
+    assert v2.by_status == {
+        Status.APPLIED: 1,
+        Status.INTERVIEW: 1,
+        Status.REJECTED: 1,
+    }
+    assert v2.advanced == 1
+    assert v2.advance_rate == pytest.approx(1 / 3)
+    assert rows["backend-v1"].applications == 1
+    assert rows["backend-v1"].advanced == 0
+
+
+def test_resume_stats_has_a_no_resume_row_and_totals_add_up(tmp_path: Path) -> None:
+    vault = _stats_vault(tmp_path)
+
+    rows = core.resume_stats(vault=vault)
+
+    assert rows[-1].resume is None
+    assert rows[-1].applications == 1
+    applied_count = 5  # a1-a3, b1, n1; the found vacancies are excluded
+    assert sum(r.applications for r in rows) == applied_count
+
+
+def test_resume_stats_omits_the_no_resume_row_when_every_application_has_one(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, "a1", resume="a")
+
+    assert [r.resume for r in core.resume_stats(vault=vault)] == ["a"]
+
+
+def test_resume_stats_orders_by_count_then_label_with_no_resume_last(
+    tmp_path: Path,
+) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, "a1", resume="a")
+    for index in range(3):
+        _applied_vacancy(vault, f"b{index}", resume="b")
+    _applied_vacancy(vault, "n1")
+    _applied_vacancy(vault, "c1", resume="c")
+
+    assert [r.resume for r in core.resume_stats(vault=vault)] == ["b", "a", "c", None]
+
+
+def test_resume_stats_since_filters_on_applied_date(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+    _applied_vacancy(vault, "a1", resume="a", applied_date=date(2026, 1, 10))
+    _applied_vacancy(vault, "a2", resume="a", applied_date=date(2026, 3, 1))
+
+    rows = core.resume_stats(since=date(2026, 2, 1), vault=vault)
+
+    assert [(r.resume, r.applications) for r in rows] == [("a", 1)]
+
+
+def test_resume_stats_with_no_applications_is_empty(tmp_path: Path) -> None:
+    vault = _minimal_built_vault(tmp_path / "vault")
+
+    assert core.resume_stats(vault=vault) == []
+
+
+def test_resume_stats_does_not_touch_the_index(tmp_path: Path) -> None:
+    vault = _stats_vault(tmp_path)
+
+    core.resume_stats(vault=vault)
+
+    assert not default_index_path(vault).exists()

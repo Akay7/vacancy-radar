@@ -16,10 +16,10 @@ Skips cleanly when Playwright or its Chromium build is missing, so a plain
 
 from __future__ import annotations
 
+import json
 import re
-from collections.abc import Callable, Iterator
 from datetime import date
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 
@@ -30,6 +30,8 @@ from vacancy_radar.models import DocumentKind, Status
 sync_api = pytest.importorskip("playwright.sync_api")
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from playwright.sync_api import Browser
 
 # A `message` recorder, injected as the first <script> in <head> so it runs
@@ -49,7 +51,16 @@ _DELIVER_RESULT = """
 }))
 """
 
-RenderFn = Callable[[str, dict[str, Any]], dict[str, Any]]
+
+class RenderFn(Protocol):
+    def __call__(
+        self,
+        tool: str,
+        structured_content: dict[str, Any],
+        *,
+        content_only: bool = False,
+        wrapped_content: bool = False,
+    ) -> dict[str, Any]: ...
 
 
 # --- Result fixtures (serialized exactly as the server serializes them) ----
@@ -179,11 +190,33 @@ def chromium_browser() -> Iterator[Browser]:
 def render_view(chromium_browser: Browser) -> Iterator[RenderFn]:
     context = chromium_browser.new_context()
 
-    def _render(tool: str, structured_content: dict[str, Any]) -> dict[str, Any]:
+    def _render(
+        tool: str,
+        structured_content: dict[str, Any],
+        *,
+        content_only: bool = False,
+        wrapped_content: bool = False,
+    ) -> dict[str, Any]:
         _title, html = mcp_server.PAGES[mcp_server.VIEW_URIS[tool]]
         page = context.new_page()
         page.set_content(html.replace("<head>\n", "<head>\n" + _CAPTURE_SCRIPT, 1))
-        page.evaluate(_DELIVER_RESULT, {"structuredContent": structured_content})
+        params = (
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            structured_content
+                            if wrapped_content
+                            else structured_content["result"]
+                        ),
+                    }
+                ]
+            }
+            if content_only
+            else {"structuredContent": structured_content}
+        )
+        page.evaluate(_DELIVER_RESULT, params)
         result = {
             "text": page.text_content("#vr-root"),
             "html": page.inner_html("#vr-root"),
@@ -217,6 +250,37 @@ def test_vacancy_list_view_renders_every_row(render_view: RenderFn) -> None:
     methods = _methods(view["messages"])
     assert "ui/initialize" in methods
     assert methods[-1] == "ui/notifications/size-changed"
+
+
+def test_vacancy_list_view_renders_text_only_tool_result(render_view: RenderFn) -> None:
+    sc = _list_result()
+
+    text = render_view("list_vacancies", sc, content_only=True)["text"]
+
+    for row in sc["result"]:
+        assert row["company"] in text
+        assert row["role"] in text
+        assert row["id"] in text
+
+
+def test_vacancy_list_view_renders_wrapped_result_envelopes(
+    render_view: RenderFn,
+) -> None:
+    sc = _list_result()
+    wrapped = {"result": {"result": sc["result"]}}
+
+    structured_text = render_view("list_vacancies", wrapped)["text"]
+    content_text = render_view(
+        "list_vacancies", sc, content_only=True, wrapped_content=True
+    )["text"]
+
+    for row in sc["result"]:
+        assert row["company"] in structured_text
+        assert row["role"] in structured_text
+        assert row["id"] in structured_text
+        assert row["company"] in content_text
+        assert row["role"] in content_text
+        assert row["id"] in content_text
 
 
 def test_vacancy_detail_view_shows_fields_and_document_index_not_bodies(
