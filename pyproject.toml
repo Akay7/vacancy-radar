@@ -1,6 +1,6 @@
 [project]
 name = "vacancy-radar"
-version = "0.3.1"
+version = "0.3.2"
 description = "Local-first job application tracker with hybrid search and an MCP server."
 readme = "README.md"
 requires-python = ">=3.12"

@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/), and this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-11-08
+
+### Fixed
+
+- **Concurrent writes could permanently break YAML serialization.** The
+  frontmatter reader/writer shared one `ruamel.yaml` instance across the
+  process, and it is not thread-safe. Two writes landing at once (e.g.
+  parallel MCP tool calls) could wedge its emitter, after which every
+  later write failed with `EmitterError: expected NodeEvent, but got
+  DocumentStartEvent` until the process restarted. Each parse and
+  serialize now uses its own instance; round-trip fidelity is unchanged.
+
 ## [0.3.1] - 2026-11-08
 
 ### Changed
@@ -163,6 +175,7 @@ markdown vault, with hybrid search and an MCP server.
 - CI on pushes to `main` and pull requests: pre-commit hooks and the
   full test suite, with the embedding model cached by model name.
 
+[0.3.2]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.3.2
 [0.3.1]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.2.0

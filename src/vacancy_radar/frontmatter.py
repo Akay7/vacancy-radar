@@ -14,9 +14,22 @@ from ruamel.yaml.comments import CommentedMap
 
 _DELIMITER = "---"
 
-_yaml = YAML(typ="rt")
-_yaml.preserve_quotes = True
-_yaml.indent(mapping=2, sequence=4, offset=2)
+
+def _yaml() -> YAML:
+    """Return a fresh round-trip `YAML` instance.
+
+    A `YAML` instance keeps parser/emitter state between calls and is not
+    thread-safe: two threads dumping through one shared instance can leave
+    its emitter mid-document, after which *every* later dump in the
+    process fails with "expected NodeEvent, but got DocumentStartEvent".
+    Concurrent writers (the MCP server, tests/test_concurrent_writes.py)
+    hit that, so nothing is shared - construction is cheap next to the
+    file I/O around every call.
+    """
+    yaml = YAML(typ="rt")
+    yaml.preserve_quotes = True
+    yaml.indent(mapping=2, sequence=4, offset=2)
+    return yaml
 
 
 class FrontmatterError(Exception):
@@ -71,7 +84,7 @@ def parse(text: str, *, filename: str | None = None) -> tuple[CommentedMap, str]
     body = "".join(lines[close_index + 1 :])
 
     try:
-        metadata = _yaml.load(yaml_text)
+        metadata = _yaml().load(yaml_text)
     except Exception as exc:
         raise MalformedFrontmatterError(filename, exc) from exc
 
@@ -81,6 +94,6 @@ def parse(text: str, *, filename: str | None = None) -> tuple[CommentedMap, str]
 def serialize(metadata: Mapping[str, object], body: str) -> str:
     """Serialize `metadata` and `body` back into frontmatter + body text."""
     stream = io.StringIO()
-    _yaml.dump(metadata, stream)
+    _yaml().dump(metadata, stream)
     yaml_text = stream.getvalue()
     return f"{_DELIMITER}\n{yaml_text}{_DELIMITER}\n{body}"

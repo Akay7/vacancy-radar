@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from vacancy_radar.frontmatter import (
@@ -68,3 +70,20 @@ def test_body_dashes_line_is_not_a_delimiter() -> None:
 
     assert "---" in body
     assert serialize(metadata, body) == BODY_WITH_DASHES_TEXT
+
+
+def test_concurrent_round_trips_from_many_threads_stay_correct() -> None:
+    """Regression: a shared module-level `YAML` instance let two threads'
+    dumps interleave, wedging its emitter so every later dump in the
+    process raised `EmitterError`. No instance may be shared."""
+
+    def round_trip(_: int) -> str:
+        metadata, body = parse(VALID_TEXT)
+        return serialize(metadata, body)
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(round_trip, range(2000)))
+
+    assert all(result == VALID_TEXT for result in results)
+    # And a later call on this thread still works afterwards.
+    assert serialize(*parse(VALID_TEXT)) == VALID_TEXT
