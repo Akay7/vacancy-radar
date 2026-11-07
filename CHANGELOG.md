@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/), and this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-11-08
+
+### Changed
+
+- **Releases now carry PyPI provenance.** The release workflow publishes
+  with `pypa/gh-action-pypi-publish` instead of `uv publish`, so every
+  wheel and sdist is uploaded with a signed PEP 740 attestation tying it
+  to this repository and the `release.yml` workflow. PyPI shows it on
+  the release's Security tab. No code changes since 0.3.0.
+
 ## [0.3.0] - 2026-11-08
 
 ### Added
@@ -153,6 +163,7 @@ markdown vault, with hybrid search and an MCP server.
 - CI on pushes to `main` and pull requests: pre-commit hooks and the
   full test suite, with the embedding model cached by model name.
 
+[0.3.1]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.1.0
