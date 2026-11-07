@@ -1,17 +1,21 @@
 import asyncio
 import json
+import re
 import subprocess
 import sys
 import time
 import warnings
 from collections.abc import Coroutine
 from datetime import date
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
-from mcp.server.mcpserver.exceptions import ToolError
+from fastmcp.apps import UI_MIME_TYPE as APP_MIME_TYPE
+from fastmcp.exceptions import ToolError
+from mcp.server.lowlevel import NotificationOptions
 
 from vacancy_radar import core, frontmatter, mcp_server
 from vacancy_radar.config import VaultNotFoundError
@@ -43,7 +47,7 @@ _MODEL_NOT_LOADED_AT_BUILD_MSG = "embedding model should not load at server buil
 _MODEL_NOT_LOADED_FOR_KEYWORD_MSG = (
     "embedding model should not load for a keyword search"
 )
-_EXPECTED_TOOL_COUNT = 12
+_EXPECTED_TOOL_COUNT = 13
 
 
 def _init_vault(vault: Path) -> None:
@@ -386,6 +390,7 @@ def test_list_vacancies_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
         since=None,
         stale_days=None,
         needs_review=False,
+        resume=None,
         limit=core.DEFAULT_LIST_LIMIT,
         vault=vault,
     )
@@ -395,13 +400,14 @@ def test_list_vacancies_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_list_vacancies_schema_matches_core_param_names() -> None:
     server = mcp_server.build_server(Path("/vault"))
     tools = {t.name: t for t in run(server.list_tools())}
-    props = set(tools["list_vacancies"].input_schema["properties"])
+    props = set(tools["list_vacancies"].parameters["properties"])
     assert props <= {
         "status",
         "company",
         "since",
         "stale_days",
         "needs_review",
+        "resume",
         "limit",
     }
 
@@ -509,12 +515,35 @@ def test_search_tool_delegates_and_maps_company(
     )
 
 
+def _prop_enum(schema: dict, prop: str) -> list[str]:
+    """The enum a tool's `prop` argument accepts, wherever the schema
+    generator put it. FastMCP inlines an enum into the property (and
+    under `anyOf`/`items` for optional or list-valued ones) rather than
+    emitting a `$defs` reference, so this walks the property subtree for
+    the one `enum` it contains instead of assuming either encoding."""
+    found: list[list[str]] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if isinstance(node.get("enum"), list):
+                found.append(node["enum"])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(schema["properties"][prop])
+    assert len(found) == 1, f"expected one enum under {prop!r}, got {len(found)}"
+    return found[0]
+
+
 def test_search_schema_enums_match_status_and_mode() -> None:
     server = mcp_server.build_server(Path("/vault"))
     tools = {t.name: t for t in run(server.list_tools())}
-    schema = tools["search"].input_schema
-    status_enum = schema["$defs"]["Status"]["enum"]
-    mode_enum = schema["$defs"]["SearchMode"]["enum"]
+    schema = tools["search"].parameters
+    status_enum = _prop_enum(schema, "status")
+    mode_enum = _prop_enum(schema, "mode")
     assert status_enum == [s.value for s in Status]
     assert mode_enum == [m.value for m in SearchMode]
 
@@ -599,6 +628,17 @@ def test_append_note_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.content[0].text == "/vault/acme/v1/documents/note.md"
 
 
+@pytest.mark.parametrize("tool", ["append_note", "add_document", "create_vacancy"])
+def test_write_tool_output_schema_has_no_path_format(tool: str) -> None:
+    # `format: "path"` (from a `Path` return) is not a JSON Schema format
+    # and opencode warns about it on every startup.
+    server = mcp_server.build_server(Path("/vault"))
+    schema = run(server.list_tools())
+    output = {t.name: t.output_schema for t in schema}[tool]
+
+    assert '"format": "path"' not in json.dumps(output)
+
+
 def test_set_status_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
     vault = Path("/vault")
     server = mcp_server.build_server(vault)
@@ -614,15 +654,21 @@ def test_set_status_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
     run(server.call_tool("set_status", {"vacancy_id": "v1", "new_status": "screening"}))
 
     mock.assert_called_once_with(
-        "v1", Status.SCREENING, note=None, applied_date=None, force=False, vault=vault
+        "v1",
+        Status.SCREENING,
+        note=None,
+        applied_date=None,
+        resume=None,
+        force=False,
+        vault=vault,
     )
 
 
 def test_set_status_schema_enum_matches_status() -> None:
     server = mcp_server.build_server(Path("/vault"))
     tools = {t.name: t for t in run(server.list_tools())}
-    schema = tools["set_status"].input_schema
-    enum = schema["$defs"]["Status"]["enum"]
+    schema = tools["set_status"].parameters
+    enum = _prop_enum(schema, "new_status")
     assert enum == [s.value for s in Status]
 
 
@@ -681,15 +727,15 @@ def test_add_document_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_add_document_schema_enum_matches_document_kind() -> None:
     server = mcp_server.build_server(Path("/vault"))
     tools = {t.name: t for t in run(server.list_tools())}
-    schema = tools["add_document"].input_schema
-    enum = schema["$defs"]["DocumentKind"]["enum"]
+    schema = tools["add_document"].parameters
+    enum = _prop_enum(schema, "kind")
     assert enum == [k.value for k in DocumentKind]
 
 
 def test_add_document_schema_has_no_path_argument() -> None:
     server = mcp_server.build_server(Path("/vault"))
     tools = {t.name: t for t in run(server.list_tools())}
-    props = set(tools["add_document"].input_schema["properties"])
+    props = set(tools["add_document"].parameters["properties"])
     assert "path" not in props
 
 
@@ -761,6 +807,7 @@ def test_create_vacancy_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
         salary_note=None,
         recruiter=None,
         tags=None,
+        resume=None,
         vault=vault,
     )
     assert (
@@ -773,7 +820,7 @@ def test_create_vacancy_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_create_vacancy_schema_matches_core_param_names() -> None:
     server = mcp_server.build_server(Path("/vault"))
     tools = {t.name: t for t in run(server.list_tools())}
-    props = set(tools["create_vacancy"].input_schema["properties"])
+    props = set(tools["create_vacancy"].parameters["properties"])
     assert props == {
         "company",
         "role",
@@ -785,14 +832,15 @@ def test_create_vacancy_schema_matches_core_param_names() -> None:
         "salary_note",
         "recruiter",
         "tags",
+        "resume",
     }
 
 
 def test_create_vacancy_status_enum_matches_status() -> None:
     server = mcp_server.build_server(Path("/vault"))
     tools = {t.name: t for t in run(server.list_tools())}
-    schema = tools["create_vacancy"].input_schema
-    enum = schema["$defs"]["Status"]["enum"]
+    schema = tools["create_vacancy"].parameters
+    enum = _prop_enum(schema, "status")
     assert enum == [s.value for s in Status]
 
 
@@ -817,6 +865,7 @@ def test_create_vacancy_omitting_optional_fields_matches_core_defaults(
         salary_note=None,
         recruiter=None,
         tags=None,
+        resume=None,
         vault=vault,
     )
 
@@ -1050,7 +1099,7 @@ def test_find_existing_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_find_existing_schema_matches_core_param_names() -> None:
     server = mcp_server.build_server(Path("/vault"))
     tools = {t.name: t for t in run(server.list_tools())}
-    props = set(tools["find_existing"].input_schema["properties"])
+    props = set(tools["find_existing"].parameters["properties"])
     assert props == {"company", "source_url"}
 
 
@@ -1125,7 +1174,7 @@ def test_find_existing_tool_matches_source_url_across_company_spellings(
 # --- Section 20: annotations / tool-list membership -------------------
 
 
-def test_tool_list_is_exactly_the_twelve_specified_tools() -> None:
+def test_tool_list_is_exactly_the_thirteen_specified_tools() -> None:
     server = mcp_server.build_server(Path("/vault"))
     names = {t.name for t in run(server.list_tools())}
     assert names == {
@@ -1136,6 +1185,7 @@ def test_tool_list_is_exactly_the_twelve_specified_tools() -> None:
         "read_document",
         "resolve",
         "find_existing",
+        "resume_stats",
         "append_note",
         "set_status",
         "edit_vacancy",
@@ -1161,6 +1211,7 @@ def test_read_tools_have_read_only_hint_true() -> None:
         "read_document",
         "resolve",
         "find_existing",
+        "resume_stats",
     }
     for tool in run(server.list_tools()):
         if tool.name in read_tools:
@@ -1188,7 +1239,7 @@ def test_write_tools_have_read_only_and_destructive_hint_false() -> None:
 def test_no_tool_schema_accepts_a_write_path_argument() -> None:
     server = mcp_server.build_server(Path("/vault"))
     for tool in run(server.list_tools()):
-        props = tool.input_schema.get("properties", {})
+        props = tool.parameters.get("properties", {})
         if tool.name == "read_document":
             continue  # the one read-only path argument this change has
         assert "path" not in props
@@ -1230,7 +1281,7 @@ def test_companies_resource_lists_every_company(tmp_path: Path) -> None:
     vault = _demo_vault(tmp_path / "vault")
     server = mcp_server.build_server(vault)
     contents = run(server.read_resource("vacancy-radar://companies"))
-    payload = json.loads(next(iter(contents)).content)
+    payload = json.loads(contents.contents[0].content)
     by_slug = {row["slug"]: row for row in payload}
     assert by_slug["acme"] == {"slug": "acme", "name": "Acme Corp", "vacancy_count": 2}
     assert by_slug["beta"] == {"slug": "beta", "name": "Beta Inc", "vacancy_count": 1}
@@ -1239,7 +1290,7 @@ def test_companies_resource_lists_every_company(tmp_path: Path) -> None:
 def test_statuses_resource_lists_every_status_and_its_transitions() -> None:
     server = mcp_server.build_server(Path("/vault"))
     contents = run(server.read_resource("vacancy-radar://statuses"))
-    payload = json.loads(next(iter(contents)).content)
+    payload = json.loads(contents.contents[0].content)
     by_status = {row["status"]: set(row["transitions"]) for row in payload}
     assert set(by_status) == {s.value for s in Status}
     for status in Status:
@@ -1254,7 +1305,7 @@ def test_statuses_resource_reflects_models_py_live(
     patched[Status.REJECTED] = frozenset({Status.APPLIED})
     monkeypatch.setattr(mcp_server, "STATUS_TRANSITIONS", patched)
     contents = run(server.read_resource("vacancy-radar://statuses"))
-    payload = json.loads(next(iter(contents)).content)
+    payload = json.loads(contents.contents[0].content)
     by_status = {row["status"]: row["transitions"] for row in payload}
     assert by_status["rejected"] == ["applied"]
 
@@ -1265,7 +1316,7 @@ def test_statuses_resource_reflects_models_py_live(
 def test_prep_interview_references_real_content(tmp_path: Path) -> None:
     vault = _demo_vault(tmp_path / "vault")
     server = mcp_server.build_server(vault)
-    messages = run(server.get_prompt("prep_interview", {"company": "Acme Corp"}))
+    messages = run(server.render_prompt("prep_interview", {"company": "Acme Corp"}))
     text = " ".join(m.content.text for m in messages.messages)
     assert "Backend Engineer" in text
     assert "python and distributed systems" in text
@@ -1275,7 +1326,9 @@ def test_prep_interview_references_real_content(tmp_path: Path) -> None:
 def test_prep_interview_unknown_company_is_a_resolution_failure(tmp_path: Path) -> None:
     vault = _demo_vault(tmp_path / "vault")
     server = mcp_server.build_server(vault)
-    messages = run(server.get_prompt("prep_interview", {"company": "Nonexistent Corp"}))
+    messages = run(
+        server.render_prompt("prep_interview", {"company": "Nonexistent Corp"})
+    )
     text = " ".join(m.content.text for m in messages.messages)
     assert (
         "no company" in text.lower()
@@ -1288,7 +1341,7 @@ def test_prep_interview_unknown_company_is_a_resolution_failure(tmp_path: Path) 
 def test_draft_reply_references_real_correspondence(tmp_path: Path) -> None:
     vault = _demo_vault(tmp_path / "vault")
     server = mcp_server.build_server(vault)
-    messages = run(server.get_prompt("draft_reply", {"vacancy_id": "v2"}))
+    messages = run(server.render_prompt("draft_reply", {"vacancy_id": "v2"}))
     text = " ".join(m.content.text for m in messages.messages)
     assert "take-home by Friday" in text
 
@@ -1298,7 +1351,7 @@ def test_weekly_review_surfaces_stale_take_home_and_needs_review(
 ) -> None:
     vault = _demo_vault(tmp_path / "vault")
     server = mcp_server.build_server(vault)
-    messages = run(server.get_prompt("weekly_review", {}))
+    messages = run(server.render_prompt("weekly_review", {}))
     text = " ".join(m.content.text for m in messages.messages)
     assert "v3" in text  # stale, needs_review
     assert "v2" in text  # take_home
@@ -1529,7 +1582,7 @@ def test_edit_vacancy_tool_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_edit_vacancy_schema_matches_core_param_names() -> None:
     server = mcp_server.build_server(Path("/vault"))
     tools = {t.name: t for t in run(server.list_tools())}
-    schema = tools["edit_vacancy"].input_schema
+    schema = tools["edit_vacancy"].parameters
 
     assert set(schema["properties"]) == {
         "vacancy_id",
@@ -1644,3 +1697,349 @@ def test_edit_vacancy_tool_touches_no_file_but_the_target_vacancy(
     }
     assert after == before
     assert vacancy_md.read_bytes() != before.get(vacancy_md.relative_to(vault))
+
+
+# --- Section 23 (add-mcp-apps-ui): the MCP Apps UI extension ---------------
+#
+# The four read tools carry a `_meta.ui` reference to a `ui://` view the
+# Apps extension registers; the extension is always on and adds nothing
+# to any tool's result. A client that did not negotiate it never sees the
+# `ui://` resources.
+
+_UI_TOOL_URIS = {
+    "list_vacancies": "ui://vacancy-radar/vacancy-list",
+    "get_vacancy": "ui://vacancy-radar/vacancy-detail",
+    "get_company": "ui://vacancy-radar/company-dossier",
+    "search": "ui://vacancy-radar/search-results",
+}
+_NETWORK_TOKENS = ("fetch(", "XMLHttpRequest", "new WebSocket", "WebSocket(")
+_EXTERNAL_REF = re.compile(r'(?:src|href)\s*=\s*["\']?(?:https?:)?//', re.IGNORECASE)
+
+
+class _SingleRootHTML(HTMLParser):
+    """Counts top-level elements to assert a view is one `<html>` document."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.depth = 0
+        self.roots: list[str] = []
+
+    def handle_starttag(self, tag: str, _attrs: object) -> None:
+        if self.depth == 0:
+            self.roots.append(tag)
+        self.depth += 1
+
+    def handle_endtag(self, _tag: str) -> None:
+        self.depth = max(0, self.depth - 1)
+
+
+def test_four_read_tools_reference_a_registered_ui_view() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    tools = {t.name: t for t in run(server.list_tools())}
+    registered = {str(r.uri) for r in run(server.list_resources())}
+
+    for name, uri in _UI_TOOL_URIS.items():
+        assert tools[name].meta == {"ui": {"resourceUri": uri}}
+        assert uri in registered
+
+    for name, tool in tools.items():
+        if name not in _UI_TOOL_URIS:
+            assert not (tool.meta and "ui" in tool.meta)
+
+
+def test_server_advertises_the_apps_extension() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    caps = server._mcp_server.get_capabilities(  # noqa: SLF001
+        NotificationOptions(), {}
+    )
+    assert "io.modelcontextprotocol/ui" in (caps.extensions or {})
+
+
+def test_cli_exposes_no_ui_toggle() -> None:
+    assert vars(mcp_server._parse_args([])) == {"vault": None}  # noqa: SLF001
+    for flag in ("--ui", "--no-ui", "--apps", "--no-apps"):
+        with pytest.raises(SystemExit):
+            mcp_server._parse_args([flag])  # noqa: SLF001
+
+
+def test_ui_resources_are_self_contained_app_documents() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    listed = {str(r.uri): r for r in run(server.list_resources())}
+
+    for uri in _UI_TOOL_URIS.values():
+        assert uri in listed
+        assert listed[uri].mime_type == APP_MIME_TYPE
+
+        contents = run(server.read_resource(uri))
+        item = contents.contents[0]
+        assert item.mime_type == APP_MIME_TYPE
+
+        body = item.content
+        assert isinstance(body, str)
+        parser = _SingleRootHTML()
+        parser.feed(body)
+        assert parser.roots == ["html"]
+
+        assert not _EXTERNAL_REF.search(body)
+        assert "<script src" not in body.lower()
+        assert "<link " not in body.lower()
+        for token in _NETWORK_TOKENS:
+            assert token not in body
+
+        csp = (item.meta or {}).get("ui", {}).get("csp", {})
+        for key in ("connectDomains", "resourceDomains", "frameDomains"):
+            assert not csp.get(key)
+
+
+def test_ui_bound_tools_return_their_core_result_untouched(tmp_path: Path) -> None:
+    """The four UI-bound tools return exactly what their one `core.py`
+    call returns, serialized - the `ui://` view is `_meta` on the tool
+    definition and adds nothing to the result a client reads."""
+    vault = _indexed_demo_vault(tmp_path / "vault")
+    server = mcp_server.build_server(vault)
+
+    cases = [
+        ("list_vacancies", {}, lambda: {"result": core.list_vacancies(vault=vault)}),
+        (
+            "get_vacancy",
+            {"id_or_query": "v1"},
+            lambda: core.get_vacancy("v1", vault=vault),
+        ),
+        (
+            "get_company",
+            {"name": "Acme Corp"},
+            lambda: core.get_company("Acme Corp", vault=vault),
+        ),
+        (
+            "search",
+            {"query": "backend engineer", "mode": "keyword"},
+            lambda: core.search(
+                "backend engineer", vault=vault, mode=SearchMode.KEYWORD
+            ),
+        ),
+    ]
+    for name, args, direct in cases:
+        served = run(server.call_tool(name, args)).structured_content
+        expected = mcp_server._to_jsonable(direct())  # noqa: SLF001
+        # `search` carries a wall-clock `elapsed_ms` that jitters between
+        # any two calls; nothing in this change touches it.
+        served.pop("elapsed_ms", None)
+        expected.pop("elapsed_ms", None)
+        assert served == expected, name
+
+
+def test_ui_resources_do_not_disturb_the_data_resources(tmp_path: Path) -> None:
+    vault = _demo_vault(tmp_path / "vault")
+    server = mcp_server.build_server(vault)
+
+    listed = {str(r.uri) for r in run(server.list_resources())}
+    assert {u for u in listed if u.startswith("vacancy-radar://")} == {
+        "vacancy-radar://companies",
+        "vacancy-radar://statuses",
+    }
+    assert {u for u in listed if u.startswith("ui://")} == set(_UI_TOOL_URIS.values())
+
+    companies = json.loads(
+        run(server.read_resource("vacancy-radar://companies")).contents[0].content
+    )
+    assert {row["slug"] for row in companies} == {"acme", "beta"}
+    statuses = json.loads(
+        run(server.read_resource("vacancy-radar://statuses")).contents[0].content
+    )
+    assert {row["status"] for row in statuses} == {s.value for s in Status}
+
+
+def test_vacancy_detail_view_reads_only_vacancy_detail_fields(tmp_path: Path) -> None:
+    """The vacancy-detail render function touches only fields that exist
+    on `VacancyDetail`/`DocumentSummary` - a rename in core.py surfaces
+    here, and a stray `body`/`text` access (a document body) fails."""
+    detail_fields = set(core.VacancyDetail.model_fields)
+    document_fields = set(core.DocumentSummary.model_fields)
+    js = mcp_server.RENDER_JS["get_vacancy"]
+
+    referenced_d = set(re.findall(r"\bd\.([a-z_]+)", js))
+    referenced_doc = set(re.findall(r"\bdoc\.([a-z_]+)", js))
+
+    assert referenced_d <= detail_fields, referenced_d - detail_fields
+    assert referenced_doc <= document_fields, referenced_doc - document_fields
+    for forbidden in ("body", "text", "content"):
+        assert forbidden not in referenced_d
+        assert forbidden not in referenced_doc
+
+    # The real result really does carry every field the view reads.
+    vault = _demo_vault(tmp_path / "vault")
+    server = mcp_server.build_server(vault)
+    call = run(server.call_tool("get_vacancy", {"id_or_query": "v1"}))
+    result = call.structured_content
+    assert referenced_d <= set(result)
+    assert result["documents"]
+    assert referenced_doc <= set(result["documents"][0])
+
+
+def test_subprocess_serves_ui_views_and_unchanged_text_to_a_plain_client(
+    tmp_path: Path,
+) -> None:
+    """End-to-end over stdio with a client that does NOT negotiate the
+    Apps extension: the four read tools still carry `_meta.ui.resourceUri`,
+    the `ui://` resources are listed and served as app documents, and a
+    tool call returns the same JSON result a non-UI client has always
+    seen. (The `capabilities.extensions` advertisement is gated to the
+    2026-07-28 wire - the plain `initialize` handshake this hand-rolled
+    client uses negotiates 2025-11-25, where `ServerCapabilities` has no
+    `extensions` field; `test_server_advertises_the_apps_extension`
+    covers the advertisement in-process.)"""
+    vault = _demo_vault(tmp_path / "vault")
+
+    proc = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-m", "vacancy_radar.mcp_server", "--vault", str(vault)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    try:
+
+        def send(obj: dict) -> None:
+            proc.stdin.write(json.dumps(obj) + "\n")
+            proc.stdin.flush()
+
+        def recv() -> dict:
+            line = proc.stdout.readline()
+            assert line, "no output from server (it may have crashed)"
+            return json.loads(line)
+
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2026-07-28",
+                    "capabilities": {},  # no extensions negotiated
+                    "clientInfo": {"name": "plain-client", "version": "0.0.0"},
+                },
+            }
+        )
+        assert recv()["result"]["protocolVersion"]
+
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        tools = {t["name"]: t for t in recv()["result"]["tools"]}
+        assert len(tools) == _EXPECTED_TOOL_COUNT
+        for name in ("list_vacancies", "get_vacancy", "get_company", "search"):
+            uri = tools[name]["_meta"]["ui"]["resourceUri"]
+            assert uri.startswith("ui://vacancy-radar/")
+        assert "ui" not in (tools["read_document"].get("_meta") or {})
+
+        send({"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}})
+        resource_uris = {r["uri"] for r in recv()["result"]["resources"]}
+        assert {
+            "ui://vacancy-radar/vacancy-list",
+            "ui://vacancy-radar/vacancy-detail",
+            "ui://vacancy-radar/company-dossier",
+            "ui://vacancy-radar/search-results",
+            "vacancy-radar://companies",
+            "vacancy-radar://statuses",
+        } <= resource_uris
+
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "resources/read",
+                "params": {"uri": "ui://vacancy-radar/vacancy-list"},
+            }
+        )
+        contents = recv()["result"]["contents"][0]
+        assert contents["mimeType"] == "text/html;profile=mcp-app"
+        assert contents["text"].startswith("<!doctype html>")
+
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "list_vacancies", "arguments": {}},
+            }
+        )
+        call_result = recv()["result"]
+        assert call_result.get("isError") is not True
+        rows = call_result["structuredContent"]["result"]
+        assert {row["id"] for row in rows} == {"v1", "v2", "v3"}
+    finally:
+        proc.stdin.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+# --- add-resume-tracking ------------------------------------------------------
+
+
+def test_resume_stats_tool_delegates_to_core(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = [
+        core.ResumeStats(
+            resume="backend-v2",
+            applications=2,
+            by_status={Status.APPLIED: 1, Status.INTERVIEW: 1},
+            advanced=1,
+            advance_rate=0.5,
+        )
+    ]
+    mock = MagicMock(return_value=rows)
+    monkeypatch.setattr(core, "resume_stats", mock)
+    server = mcp_server.build_server(Path("/vault"))
+
+    result = run(server.call_tool("resume_stats", {"since": "2026-02-01"}))
+
+    mock.assert_called_once_with(since=date(2026, 2, 1), vault=Path("/vault"))
+    assert result.structured_content["result"] == [
+        {
+            "resume": "backend-v2",
+            "applications": 2,
+            "by_status": {"applied": 1, "interview": 1},
+            "advanced": 1,
+            "advance_rate": 0.5,
+        }
+    ]
+
+
+def test_resume_stats_tool_is_read_only_without_a_ui_view() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    tool = next(t for t in run(server.list_tools()) if t.name == "resume_stats")
+
+    assert tool.annotations.read_only_hint is True
+    assert tool.annotations.open_world_hint is False
+    assert not (tool.meta or {}).get("ui")
+
+
+def test_write_tool_schemas_accept_resume() -> None:
+    server = mcp_server.build_server(Path("/vault"))
+    tools = {t.name: t for t in run(server.list_tools())}
+
+    for name in ("set_status", "create_vacancy", "edit_vacancy"):
+        assert "resume" in tools[name].parameters["properties"]
+    assert "resume" in tools["list_vacancies"].parameters["properties"]
+
+
+def test_set_status_and_edit_tools_record_and_clear_a_resume(tmp_path: Path) -> None:
+    vault = _editable_vault(tmp_path / "vault")
+    server = mcp_server.build_server(vault)
+
+    run(server.call_tool("edit_vacancy", {"vacancy_id": "v1", "resume": "backend-v2"}))
+    assert read_vault(vault).vacancies["v1"].resume == "backend-v2"
+
+    run(server.call_tool("edit_vacancy", {"vacancy_id": "v1", "clear": ["resume"]}))
+    assert read_vault(vault).vacancies["v1"].resume is None
+
+    run(
+        server.call_tool(
+            "set_status",
+            {"vacancy_id": "v1", "new_status": "screening", "resume": "backend-v3"},
+        )
+    )
+    assert read_vault(vault).vacancies["v1"].resume == "backend-v3"

@@ -2,7 +2,7 @@
 
 ## Purpose
 Defines `core.edit_vacancy` — the single validated, atomic write that
-corrects a vacancy's stored frontmatter fields. Covers which nine fields are
+corrects a vacancy's stored frontmatter fields. Covers which ten fields are
 editable (and why `id`, `status`, `company`, and `company_slug` are not),
 how a field is set versus cleared, whole-model validation before any write,
 no-op semantics, preservation of every untouched line, and the eager index

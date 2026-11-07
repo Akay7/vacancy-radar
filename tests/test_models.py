@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -148,7 +148,7 @@ def test_applied_date_before_found_date_is_rejected() -> None:
 
 
 def test_found_date_in_the_future_is_rejected() -> None:
-    tomorrow = datetime.now(UTC).date() + timedelta(days=1)
+    tomorrow = datetime.now().astimezone().date() + timedelta(days=1)
 
     with pytest.raises(ValidationError):
         Vacancy(**minimal_vacancy_data(found_date=tomorrow))
@@ -352,3 +352,32 @@ def test_status_transitions_terminal_statuses_have_no_unforced_follow_on() -> No
 def test_status_transitions_has_no_self_loops() -> None:
     for status, reachable in STATUS_TRANSITIONS.items():
         assert status not in reachable
+
+
+# --- add-resume-tracking ----------------------------------------------------
+
+
+def test_vacancy_without_resume_parses_with_none() -> None:
+    assert Vacancy(**minimal_vacancy_data()).resume is None
+
+
+def test_vacancy_resume_is_trimmed() -> None:
+    vacancy = Vacancy(**minimal_vacancy_data(resume="  backend-v2 "))
+
+    assert vacancy.resume == "backend-v2"
+
+
+def test_vacancy_resume_is_allowed_while_found() -> None:
+    vacancy = Vacancy(**minimal_vacancy_data(status=Status.FOUND, resume="a"))
+
+    assert vacancy.resume == "a"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "a\nb", "x" * 65])
+def test_vacancy_resume_rejects_blank_multiline_or_too_long(bad: str) -> None:
+    with pytest.raises(ValidationError):
+        Vacancy(**minimal_vacancy_data(resume=bad))
+
+
+def test_vacancy_resume_of_exactly_the_limit_is_valid() -> None:
+    assert Vacancy(**minimal_vacancy_data(resume="x" * 64)).resume == "x" * 64

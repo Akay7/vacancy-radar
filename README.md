@@ -47,6 +47,11 @@ ships no spreadsheet parser and no interchange format.
 You need [uv](https://docs.astral.sh/uv/). Nothing else — no clone, no
 `uv.lock`.
 
+**Python 3.12–3.14 are supported; Python 3.15 is not yet.** `fastembed`
+depends on `onnxruntime`, which doesn't publish 3.15 builds yet. If your
+default interpreter is 3.15, point uv at a supported one, e.g. `uv tool
+install --python 3.14 vacancy-radar`.
+
 **macOS / Linux:**
 
 ```bash
@@ -151,7 +156,51 @@ scope it to that project only:
 }
 ```
 
-All three assume `uv tool install` from step 1 put `vacancy-radar-mcp`
+For [Goose](https://block.github.io/goose/), use the desktop app's form
+(it writes a YAML config file, shown below, rather than JSON): open
+**Extensions → Add custom extension** and fill it in.
+
+| Field | Value |
+| --- | --- |
+| Extension Name | `vacancy-radar` |
+| Type | `STDIO` |
+| Command | `vacancy-radar-mcp --vault /absolute/path/to/job-search` |
+| Timeout | `300` (the default) |
+
+The Command field takes the whole command line, arguments included, and
+no environment variables are needed. Goose renders the
+[inline views](#mcp-server-reference) for this server, so
+`list_vacancies` and the other read tools show a card or table in the
+chat. The CLI route is `goose configure` → *Add Extension* → *Command-line
+Extension*, and the result is this entry in
+`~/.config/goose/config.yaml`, which you can also write by hand:
+
+```yaml
+extensions:
+  vacancy-radar:
+    enabled: true
+    type: stdio
+    name: vacancy-radar
+    cmd: vacancy-radar-mcp
+    args:
+      - --vault
+      - /absolute/path/to/job-search
+    timeout: 300
+```
+
+Goose runs the installed `vacancy-radar-mcp`, not your clone. If you
+upgrade vacancy-radar (or change the views from a clone) and a view still
+looks like the old one, refresh the install, then restart the extension:
+
+```bash
+uv tool install --reinstall --force .   # from a clone; or: uv tool upgrade vacancy-radar
+```
+
+If it still looks old, Goose may be serving its cached copy: delete
+`~/.config/goose/mcp-apps-cache/vacancy-radar_*.json` and restart the
+extension again.
+
+All four assume `uv tool install` from step 1 put `vacancy-radar-mcp`
 on PATH. If you would rather not install it persistently, use `uvx` as
 the command instead — but note it needs `--from`, because `uvx`
 resolves a *distribution* named after the command it is given, and the
@@ -178,6 +227,9 @@ For opencode, that's the `command` array instead:
 ```json
 "command": ["uvx", "--from", "vacancy-radar", "vacancy-radar-mcp", "--vault", "/absolute/path/to/job-search"]
 ```
+
+For Goose, put `uvx --from vacancy-radar vacancy-radar-mcp --vault /absolute/path/to/job-search`
+in the Command field.
 
 A bare `uvx vacancy-radar-mcp` looks for a distribution that does not
 exist.
@@ -264,8 +316,17 @@ suitable for piping.
 
 ```bash
 # List vacancies, optionally filtered (--status, --company, --since,
-# --needs-review, --stale-days), sorted by last activity.
+# --needs-review, --stale-days, --resume), sorted by last activity.
 vacancy-radar list --status applied --status interview
+
+# Compare resume variants (an A/B test of your resumes): for each
+# --resume label, how many applications used it and how they stand now.
+# Counts only vacancies already applied to. "advanced" means currently
+# screening / take_home / interview / offer - an application rejected
+# after an interview counts as rejected. Rates come from current status
+# and small counts are noise, so compare variants sent to comparable
+# roles and read the counts, not just the percentage.
+vacancy-radar resumes --since 2026-01-01
 
 # Show one vacancy or company - which kind it is is auto-detected.
 vacancy-radar show acme-corp
@@ -308,6 +369,12 @@ vacancy-radar note 2022-03-22-acme-corp-backend-engineer \
 # move off 'found' needs --applied-date.
 vacancy-radar status set 2022-03-22-acme-corp-backend-engineer \
     applied --applied-date 2026-01-15
+
+# Record which resume variant you applied with (any short label, e.g.
+# "backend-v2"). Also accepted by `new` and `edit` (`--clear resume`
+# removes it). Labels compare case-insensitively.
+vacancy-radar status set 2022-03-22-acme-corp-backend-engineer \
+    applied --applied-date 2026-01-15 --resume backend-v2
 vacancy-radar status set 2022-03-22-acme-corp-backend-engineer \
     found --force
 
@@ -321,7 +388,7 @@ vacancy-radar edit 2022-03-22-acme-corp-backend-engineer \
 
 # Remove a field with --clear (repeatable). Only the nullable fields can
 # be cleared: source-url, stage-note, salary-note, recruiter,
-# external-id, applied-date.
+# external-id, applied-date, resume.
 vacancy-radar edit 2022-03-22-acme-corp-backend-engineer \
     --clear recruiter --clear salary-note
 
@@ -405,7 +472,7 @@ default (2026-07-28, SEP-2577), so `--vault`/`VAULT_PATH` are the only
 two ways to point the server at a vault, exactly like configuring any
 other stdio MCP server.
 
-**Twelve tools**, matching `core.py`'s functions one for one - argument
+**Thirteen tools**, matching `core.py`'s functions one for one - argument
 marshalling only, no filtering/sorting/business logic of its own:
 
 | tool | delegates to |
@@ -417,6 +484,7 @@ marshalling only, no filtering/sorting/business logic of its own:
 | `read_document` | `core.read_document` |
 | `resolve` | `core.resolve` |
 | `find_existing` | `core.find_existing` |
+| `resume_stats` | `core.resume_stats` |
 | `append_note` | `core.append_note` |
 | `set_status` | `core.set_status` |
 | `edit_vacancy` | `core.edit_vacancy` |
@@ -449,6 +517,15 @@ match tone), and `weekly_review()` (stale applications, pending
 take-homes, vacancies tagged `needs_review`). An unresolved or
 ambiguous `company`/`vacancy_id` returns a message saying so - never a
 fabricated dossier.
+
+**Inline views (MCP Apps).** The server registers the
+`io.modelcontextprotocol/ui` extension, so a host that supports it
+renders `list_vacancies`, `get_vacancy`, `get_company`, and `search`
+results as a compact card or table instead of raw JSON. The views are
+static, self-contained HTML with no network access; they render only
+the fields already in the tool's result. Nothing to configure, and a
+client that doesn't support the extension sees exactly the same text
+output as before.
 
 ## Working on the code
 
