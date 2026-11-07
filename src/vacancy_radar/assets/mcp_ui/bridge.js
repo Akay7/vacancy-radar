@@ -23,7 +23,9 @@
   function reportSize() {
     post({
       method: "ui/notifications/size-changed",
-      params: { height: document.documentElement.scrollHeight }
+      // The body's own box, not documentElement.scrollHeight: that is never
+      // below the viewport height, so a short view could not shrink the frame.
+      params: { height: Math.ceil(document.body.getBoundingClientRect().height) }
     });
   }
 
@@ -42,7 +44,15 @@
   window.addEventListener("message", function (event) {
     var msg = event.data;
     if (!msg || msg.jsonrpc !== "2.0") return;
-    if (msg.id === initId && msg.result) {
+    if (msg.id === initId && msg.error) {
+      // A host that rejects the handshake never sends the tool result; show
+      // why instead of leaving a blank frame.
+      var pre = document.createElement("pre");
+      pre.className = "vr-error";
+      pre.textContent = "ui/initialize failed: " + (msg.error.message || JSON.stringify(msg.error));
+      document.getElementById("vr-root").appendChild(pre);
+      reportSize();
+    } else if (msg.id === initId && msg.result) {
       applyTheme(msg.result.hostContext);
       post({ method: "ui/notifications/initialized", params: {} });
     } else if (msg.method === "ui/notifications/tool-result") {
@@ -57,8 +67,7 @@
     method: "ui/initialize",
     params: {
       protocolVersion: PROTOCOL_VERSION,
-      clientInfo: { name: "vacancy-radar", version: "0" },
-      capabilities: {},
+      appInfo: { name: "vacancy-radar", version: "0" },
       appCapabilities: { availableDisplayModes: ["inline"] }
     }
   });

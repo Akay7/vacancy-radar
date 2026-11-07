@@ -52,6 +52,59 @@ _DELIVER_RESULT = """
 """
 
 
+# A strict stand-in for a real MCP Apps host (Goose's `AppBridge` from
+# `@modelcontextprotocol/ext-apps`). Unlike `_DELIVER_RESULT`, which pushes a
+# tool result straight into the page, this follows the host's rules: a
+# `ui/initialize` whose params lack the spec's required `appInfo` /
+# `appCapabilities` / `protocolVersion` is answered with a JSON-RPC *error*,
+# and the tool result is sent only after the app's
+# `ui/notifications/initialized`. A view that fumbles the handshake therefore
+# stays blank here, exactly as it does in Goose.
+_STRICT_HOST_SCRIPT = """<script>
+window.__captured = [];
+window.__tool_result = %(params)s;
+window.__reject_init = %(reject)s;
+function reply(data) {
+  const data2 = { jsonrpc: '2.0', ...data };
+  window.dispatchEvent(new MessageEvent('message', { data: data2 }));
+}
+function invalid(p) {
+  const str = (v) => typeof v === 'string';
+  if (!p || typeof p !== 'object') return 'params missing';
+  const info = p.appInfo;
+  if (!info || !str(info.name) || !str(info.version)) {
+    return 'appInfo: name and version required';
+  }
+  if (!p.appCapabilities || typeof p.appCapabilities !== 'object') {
+    return 'appCapabilities required';
+  }
+  if (!str(p.protocolVersion)) return 'protocolVersion required';
+  return null;
+}
+window.parent.postMessage = (m) => {
+  window.__captured.push(m);
+  setTimeout(() => {
+    if (m.method === 'ui/initialize') {
+      const problem = window.__reject_init ? 'host refuses' : invalid(m.params);
+      if (problem) {
+        const error = { code: -32602, message: 'Invalid params: ' + problem };
+        return reply({ id: m.id, error });
+      }
+      reply({ id: m.id, result: {
+        protocolVersion: m.params.protocolVersion,
+        hostInfo: { name: 'strict-host', version: '0' },
+        hostCapabilities: {},
+        hostContext: { theme: 'light' },
+      } });
+    } else if (m.method === 'ui/notifications/initialized') {
+      reply({ method: 'ui/notifications/tool-result', params: window.__tool_result });
+    }
+  }, 0);
+};
+</script>
+"""
+
+
 class RenderFn(Protocol):
     def __call__(
         self,
@@ -332,12 +385,102 @@ def test_view_handles_an_empty_result(render_view: RenderFn) -> None:
     assert "No vacancies." in render_view("list_vacancies", {"result": []})["text"]
 
 
+_EMPTY_STATE_MAX_HEIGHT = 100  # px; one line of text plus padding
+
+
+def test_reported_height_fits_the_content_not_the_viewport(
+    render_view: RenderFn,
+) -> None:
+    """Hosts size the frame from `size-changed`. `documentElement.scrollHeight`
+    is never below the viewport height, so a short view (an empty list) would
+    report the tall default frame back and never shrink."""
+    view = render_view("list_vacancies", {"result": []})
+
+    heights = [
+        m["params"]["height"]
+        for m in view["messages"]
+        if m.get("method") == "ui/notifications/size-changed"
+    ]
+    assert heights
+    assert heights[-1] < _EMPTY_STATE_MAX_HEIGHT, (
+        f"empty state reported height {heights[-1]}"
+    )
+
+
 def test_view_survives_a_malformed_result_without_a_blank_frame(
     render_view: RenderFn,
 ) -> None:
     view = render_view("search", {})  # `hits` missing entirely
     assert "No matches." in view["text"]
     assert "ui/notifications/size-changed" in _methods(view["messages"])
+
+
+# --- Handshake with a strict host ------------------------------------------
+
+_VIEW_RESULTS = {
+    "list_vacancies": (_list_result, "Backend Engineer"),
+    "get_vacancy": (_vacancy_detail_result, "Backend Engineer"),
+    "get_company": (_company_result, "Acme Corp"),
+    "search": (_search_result, "Backend Engineer"),
+}
+
+
+def _open_with_strict_host(
+    browser: Browser, tool: str, params: dict[str, Any], *, reject_init: bool = False
+) -> Any:  # noqa: ANN401 - a Playwright Page
+    _title, html = mcp_server.PAGES[mcp_server.VIEW_URIS[tool]]
+    script = _STRICT_HOST_SCRIPT % {
+        "params": json.dumps(params),
+        "reject": "true" if reject_init else "false",
+    }
+    page = browser.new_context().new_page()
+    page.set_content(html.replace("<head>\n", "<head>\n" + script, 1))
+    return page
+
+
+@pytest.mark.parametrize("tool", list(_VIEW_RESULTS))
+def test_view_renders_after_a_strict_host_handshake(
+    chromium_browser: Browser, tool: str
+) -> None:
+    build, expected = _VIEW_RESULTS[tool]
+    page = _open_with_strict_host(
+        chromium_browser, tool, {"structuredContent": build()}
+    )
+    try:
+        page.wait_for_function(
+            "document.getElementById('vr-root').childElementCount > 0", timeout=2000
+        )
+    except sync_api.TimeoutError:
+        init = next(
+            (
+                m
+                for m in page.evaluate("window.__captured")
+                if m.get("method") == "ui/initialize"
+            ),
+            None,
+        )
+        pytest.fail(
+            "view stayed blank: a strict host never sent the tool result; "
+            f"ui/initialize params were {init and init.get('params')}"
+        )
+    assert expected in page.text_content("#vr-root")
+    methods = _methods(page.evaluate("window.__captured"))
+    assert methods.index("ui/initialize") < methods.index(
+        "ui/notifications/initialized"
+    )
+
+
+def test_view_reports_a_rejected_handshake_instead_of_staying_blank(
+    chromium_browser: Browser,
+) -> None:
+    page = _open_with_strict_host(
+        chromium_browser,
+        "list_vacancies",
+        {"structuredContent": _list_result()},
+        reject_init=True,
+    )
+    page.wait_for_timeout(300)
+    assert "Invalid params: host refuses" in page.text_content("#vr-root")
 
 
 def test_theme_from_host_context_is_applied(chromium_browser: Browser) -> None:

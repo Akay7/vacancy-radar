@@ -151,7 +151,51 @@ scope it to that project only:
 }
 ```
 
-All three assume `uv tool install` from step 1 put `vacancy-radar-mcp`
+For [Goose](https://block.github.io/goose/), use the desktop app's form
+(it writes a YAML config file, shown below, rather than JSON): open
+**Extensions → Add custom extension** and fill it in.
+
+| Field | Value |
+| --- | --- |
+| Extension Name | `vacancy-radar` |
+| Type | `STDIO` |
+| Command | `vacancy-radar-mcp --vault /absolute/path/to/job-search` |
+| Timeout | `300` (the default) |
+
+The Command field takes the whole command line, arguments included, and
+no environment variables are needed. Goose renders the
+[inline views](#mcp-server-reference) for this server, so
+`list_vacancies` and the other read tools show a card or table in the
+chat. The CLI route is `goose configure` → *Add Extension* → *Command-line
+Extension*, and the result is this entry in
+`~/.config/goose/config.yaml`, which you can also write by hand:
+
+```yaml
+extensions:
+  vacancy-radar:
+    enabled: true
+    type: stdio
+    name: vacancy-radar
+    cmd: vacancy-radar-mcp
+    args:
+      - --vault
+      - /absolute/path/to/job-search
+    timeout: 300
+```
+
+Goose runs the installed `vacancy-radar-mcp`, not your clone. If you
+upgrade vacancy-radar (or change the views from a clone) and a view still
+looks like the old one, refresh the install, then restart the extension:
+
+```bash
+uv tool install --reinstall --force .   # from a clone; or: uv tool upgrade vacancy-radar
+```
+
+If it still looks old, Goose may be serving its cached copy: delete
+`~/.config/goose/mcp-apps-cache/vacancy-radar_*.json` and restart the
+extension again.
+
+All four assume `uv tool install` from step 1 put `vacancy-radar-mcp`
 on PATH. If you would rather not install it persistently, use `uvx` as
 the command instead — but note it needs `--from`, because `uvx`
 resolves a *distribution* named after the command it is given, and the
@@ -178,6 +222,9 @@ For opencode, that's the `command` array instead:
 ```json
 "command": ["uvx", "--from", "vacancy-radar", "vacancy-radar-mcp", "--vault", "/absolute/path/to/job-search"]
 ```
+
+For Goose, put `uvx --from vacancy-radar vacancy-radar-mcp --vault /absolute/path/to/job-search`
+in the Command field.
 
 A bare `uvx vacancy-radar-mcp` looks for a distribution that does not
 exist.

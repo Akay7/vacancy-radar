@@ -43,4 +43,4 @@
 
 - [x] 6.1 `build_server` with the four `ui://` resources registered: ~0.015 s (5 runs, warm import), against the `mcp-transport` bound of 2.0 s (`test_build_server_is_fast_without_an_embedding_model`). Well within.
 - [x] 6.2 View rendering is verified automatically in headless Chromium (`tests/test_mcp_ui_views.py`) — the automated stand-in for screenshotting in a real host. `test_subprocess_serves_ui_views_and_unchanged_text_to_a_plain_client` covers the non-Apps client end to end over stdio.
-- [ ] 6.3 (optional, needs a real host) Open the views once in an ext-apps-capable MCP host for a visual-polish pass; nothing functional rides on this.
+- [x] 6.3 (optional, needs a real host) Open the views once in an ext-apps-capable MCP host for a visual-polish pass; nothing functional rides on this. Done in Goose desktop: `get_vacancy` renders the detail card (fields, tags, document index). It first rendered blank because the bridge's `ui/initialize` sent `clientInfo` instead of the spec's `appInfo`, which a strict host rejects; fixed, with strict-host handshake tests in `tests/test_mcp_ui_views.py`.
