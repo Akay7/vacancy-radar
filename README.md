@@ -47,6 +47,11 @@ ships no spreadsheet parser and no interchange format.
 You need [uv](https://docs.astral.sh/uv/). Nothing else — no clone, no
 `uv.lock`.
 
+**Python 3.12–3.14 are supported; Python 3.15 is not yet.** `fastembed`
+depends on `onnxruntime`, which doesn't publish 3.15 builds yet. If your
+default interpreter is 3.15, point uv at a supported one, e.g. `uv tool
+install --python 3.14 vacancy-radar`.
+
 **macOS / Linux:**
 
 ```bash
