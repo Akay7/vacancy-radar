@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/), and this
 project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] - 2026-11-08
 
 ### Added
 
@@ -153,5 +153,6 @@ markdown vault, with hybrid search and an MCP server.
 - CI on pushes to `main` and pull requests: pre-commit hooks and the
   full test suite, with the embedding model cached by model name.
 
+[0.3.0]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Akay7/vacancy-radar/releases/tag/v0.1.0
