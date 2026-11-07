@@ -27,5 +27,5 @@
 
 - [x] 5.1 README: document `--resume`, `vacancy-radar resumes`, and the `resume_stats` tool, including the caveat that variants should be compared on comparable roles and that rates come from current status; verify each documented command runs against `tests/fixtures/vault` copied to a temp dir.
 - [x] 5.2 CHANGELOG: add an `### Added` entry under `## [Unreleased]` (tag `v0.2.0` exists) describing resume tracking and the comparison.
-- [ ] 5.3 Run `uv run pytest`, `uv run ruff check`, and the type checker the project's pre-commit uses; verify all pass, and `openspec validate add-resume-tracking --strict` passes.
+- [x] 5.3 Run `uv run pytest`, `uv run ruff check`, and the type checker the project's pre-commit uses; verify all pass, and `openspec validate add-resume-tracking --strict` passes.
 - [x] 5.4 End-to-end on a scratch vault: create two applied vacancies with different `--resume` labels, set one to `interview` via `status set`, run `vacancy-radar resumes` and the MCP `resume_stats` tool, and verify the counts match `list --resume` output for each label.

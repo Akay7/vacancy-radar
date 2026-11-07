@@ -67,14 +67,14 @@ with the `core.py` parameter it is passed as.
 #### Scenario: set_status tool argument names match core.set_status's signature
 - **WHEN** the `set_status` tool's schema is inspected
 - **THEN** its parameter names are a subset of
-  `{vacancy_id, new_status, note, applied_date, force}`, matching
-  `core.set_status`'s own parameter names exactly
+  `{vacancy_id, new_status, note, applied_date, resume, force}`,
+  matching `core.set_status`'s own parameter names exactly
 
 #### Scenario: create_vacancy tool argument names match core.create_vacancy's signature
 - **WHEN** the `create_vacancy` tool's schema is inspected
 - **THEN** its parameter names are exactly
   `{company, role, source_url, found_date, status, applied_date,
-  stage_note, salary_note, recruiter, tags}`, matching
+  stage_note, salary_note, recruiter, tags, resume}`, matching
   `core.create_vacancy`'s own parameter names exactly
 
 ### Requirement: every write tool exposes a valid JSON schema
@@ -374,8 +374,8 @@ exactly as `core.edit_vacancy`'s own parameter, and an optional
 - **WHEN** the `edit_vacancy` tool's schema is inspected
 - **THEN** its properties are exactly `vacancy_id`, `source_url`,
   `role`, `stage_note`, `salary_note`, `recruiter`, `external_id`,
-  `tags`, `found_date`, `applied_date`, and `clear`, and `vacancy_id`
-  is its only required property
+  `tags`, `found_date`, `applied_date`, `resume`, and `clear`, and
+  `vacancy_id` is its only required property
 
 #### Scenario: omitted field parameters leave those fields untouched
 - **GIVEN** a real vault with a vacancy carrying a `recruiter`
@@ -389,6 +389,12 @@ exactly as `core.edit_vacancy`'s own parameter, and an optional
 - **WHEN** the `edit_vacancy` tool is called with
   `clear=["recruiter"]`
 - **THEN** `recruiter` is absent from that vacancy's frontmatter
+  afterward
+
+#### Scenario: clear removes a resume
+- **GIVEN** a real vault with a vacancy carrying a `resume`
+- **WHEN** the `edit_vacancy` tool is called with `clear=["resume"]`
+- **THEN** `resume` is absent from that vacancy's frontmatter
   afterward
 
 ### Requirement: an edit_vacancy tool call that core.py rejects returns a typed error result

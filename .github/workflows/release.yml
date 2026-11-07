@@ -127,11 +127,6 @@ jobs:
     # be attached without editing this file.
     environment: ${{ inputs.target || 'pypi' }}
     steps:
-      - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.3
-        with:
-          python-version: "3.12"
-
       # The same artifact the verify job installed and ran - not a
       # rebuild, so what was tested is byte-identical to what ships.
       - name: Download dist
@@ -140,10 +135,16 @@ jobs:
           name: dist
           path: dist
 
+      # pypa's action rather than `uv publish`: under Trusted Publishing
+      # it also signs a PEP 740 attestation for every file (Sigstore,
+      # bound to this repo + workflow) and uploads it, which is what
+      # makes PyPI show provenance. `uv publish` only uploads files.
       - name: Publish to TestPyPI
         if: inputs.target == 'testpypi'
-        run: uv publish --publish-url https://test.pypi.org/legacy/ dist/*
+        uses: pypa/gh-action-pypi-publish@v1.14.3
+        with:
+          repository-url: https://test.pypi.org/legacy/
 
       - name: Publish to PyPI
         if: inputs.target != 'testpypi'
-        run: uv publish dist/*
+        uses: pypa/gh-action-pypi-publish@v1.14.3

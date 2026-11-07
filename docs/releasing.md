@@ -108,9 +108,12 @@ and the docs) before releasing.
      checkout and no `uv.lock` in sight, then run
      `vacancy-radar --version` (asserting it prints the released
      version) and `vacancy-radar-mcp --help` (asserting exit 0).
-   - **publish** — download the same artifact and `uv publish` it. It
-     does not rebuild, so what shipped is byte-identical to what was
-     verified.
+   - **publish** — download the same artifact and upload it with
+     `pypa/gh-action-pypi-publish`. It does not rebuild, so what shipped
+     is byte-identical to what was verified. The action also signs and
+     uploads a PEP 740 attestation for each file, so the release's
+     Security tab on PyPI shows provenance linking it to this repo and
+     workflow.
 
 6. **Check the project page** at https://pypi.org/project/vacancy-radar/
    — README rendered, MIT license shown, repository and issue links
